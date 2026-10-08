@@ -1,0 +1,373 @@
+diff --git a/Project Reboot 3.0/Bot0.cpp b/Project Reboot 3.0/Bot0.cpp
+index 15663cb..3aaad42 100644
+--- a/Project Reboot 3.0/Bot0.cpp	
++++ b/Project Reboot 3.0/Bot0.cpp	
+@@ -8,6 +8,7 @@
+ #include <utility>
+ #include <vector>
+ #include "WeakObjectPtr.h"
++#include "SoftObjectPtr.h"
+ #include "reboot.h"
+ #include "NetDriver.h"
+ #include "NetConnection.h"
+@@ -645,7 +646,7 @@ namespace Bot0
+             {
+                 LOG_INFO(LogBots, "[NAV][FAIL] diagnostic exception=0x{:x} stage={}; normal crash handler continues", Exception->ExceptionRecord->ExceptionCode, Stage);
+             }
+-            if (std::strncmp(Stage, "PHOEBE", 6) == 0)
++            if (NativeActionActive || std::strncmp(Stage, "PHOEBE", 6) == 0)
+             {
+                 LOG_INFO(LogBots, "[PHOEBE][FAIL] stage={} exception=0x{:x}; normal crash handler continues", Stage, Exception->ExceptionRecord->ExceptionCode);
+             }
+@@ -669,7 +670,7 @@ namespace Bot0
+         {
+             if (Native)
+             {
+-                LOG_INFO(LogBots, "[PHOEBE] Spawn 1 Bot requested ui_thread={} mode=native-preflight; contract remains PARTIAL", GetCurrentThreadId());
++                LOG_INFO(LogBots, "[PHOEBE] Spawn 1 Bot requested ui_thread={} revision=native-phoebe-bootstrap-v1; navigation gate precedes spawn", GetCurrentThreadId());
+             }
+             else
+             {
+@@ -723,8 +724,14 @@ namespace Bot0
+         switch (CurrentState.load())
+         {
+         case State::Queued: return "Queued for server TickFlush";
+-        case State::QueuedNative: return "Native Phoebe preflight queued for server TickFlush";
+-        case State::NativeBlocked: return "Native Phoebe PARTIAL: preflight only; no bot spawned. Inspect [PHOEBE] logs; restart host for A/B.";
++        case State::QueuedNative: return "Native Phoebe V1 queued for server TickFlush";
++        case State::NativeBlocked:
++            switch (NativeResult.load())
++            {
++            case PhoebeResult::NavBlocked: return "PHOEBE-V1 NAV-BLOCKED: no usable Phoebe NavData; no bot spawned. Restart host for A/B.";
++            case PhoebeResult::SpawnBlocked: return "PHOEBE-V1 SPAWN-BLOCKED: native data contract unresolved; no bot spawned. Restart host for A/B.";
++            default: return "Native Phoebe V1 blocked before spawn; inspect [PHOEBE][FAIL] stage. Restart host for A/B.";
++            }
+         case State::Running: return "Native spawn attempt running";
+         case State::Complete: return "Native return complete; verify in client. Restart host for another test.";
+         case State::Partial: return "Partial/failure; inspect [BOT] logs. Restart host for another test.";
+diff --git a/Project Reboot 3.0/NativePhoebe.inl b/Project Reboot 3.0/NativePhoebe.inl
+index 38c317b..6c39d09 100644
+--- a/Project Reboot 3.0/NativePhoebe.inl	
++++ b/Project Reboot 3.0/NativePhoebe.inl	
+@@ -1,6 +1,17 @@
+-// Native Phoebe audit gate, inside Bot0's existing server-context namespace.
+-// This revision deliberately has no native spawn call: its contract is unvalidated.
+-// No object creation, object/property writes, native address calls, AI loops or retries.
++// Native Phoebe V1 navigation gate, in the existing server TickFlush context.
++// The audited 13.40 helper cannot repair this world's empty NavDataSet:
++// ai.h returns immediately for an existing system; finder.h has no 426 variant.
++// Never call MANG, release locks, or fabricate a generic BR component profile.
++// No native spawn is enabled until navigation AND the native data contract exist.
++
++enum class PhoebeResult { None, NavBlocked, SpawnBlocked };
++std::atomic<PhoebeResult> NativeResult{PhoebeResult::None};
++bool NativeActionActive = false; // Server thread; also identifies native query exceptions.
++struct PhoebeActionScope
++{
++    PhoebeActionScope() { NativeActionActive = true; }
++    ~PhoebeActionScope() { NativeActionActive = false; }
++};
+ 
+ void PhoebeObject(const char* Label, UObject* Object)
+ {
+@@ -43,6 +54,153 @@ void PhoebePresence(UObject* Object, const char* Member)
+         Member, Valid(Object) && Object->GetOffset(Member, false) >= 0);
+ }
+ 
++// Read the entire bool metadata quartet, including ByteOffset. The existing
++// version-aware GetFieldMask helper documents this layout. Only this build is
++// accepted; no bool write or raw UObject bool cast is performed.
++bool PhoebeBit(UObject* Object, const char* Member, bool& Value)
++{
++    Value = false;
++    if (!Valid(Object) || Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001) return false;
++    auto Field = Object->GetProperty(Member, false);
++    const int Offset = Object->GetOffset(Member, false);
++    if (!Field || Offset < 0 || Offset > 65536 || IsBadReadPtr(Field, 124)) return false;
++    const auto Size = GetFieldMask(Field, -3);
++    const auto ByteOffset = GetFieldMask(Field, -2);
++    const auto ByteMask = GetFieldMask(Field, -1);
++    const auto Mask = GetFieldMask(Field);
++    if ((Size != 1 && Size != 2 && Size != 4 && Size != 8) || ByteOffset >= Size || !ByteMask
++        || (ByteMask & (ByteMask - 1)) || !Mask
++        || (Mask != 0xff && (Mask != ByteMask || (Mask & (Mask - 1))))) return false;
++    auto Byte = reinterpret_cast<const uint8_t*>(Object) + Offset + ByteOffset;
++    if (IsBadReadPtr(Byte, 1)) return false;
++    Value = (*Byte & Mask) != 0;
++    LOG_INFO(LogBots, "[PHOEBE] {}={} available=true owner={} offset={} byte_offset={} field_size={} byte_mask={} field_mask={}",
++        Member, Value, Object->GetPathName(), Offset, ByteOffset, Size, ByteMask, Mask);
++    return true;
++}
++
++void PhoebeFlags(UObject* Object, std::initializer_list<const char*> Members)
++{
++    for (const char* Member : Members)
++    {
++        bool Value = false;
++        if (!PhoebeBit(Object, Member, Value))
++        {
++            LOG_INFO(LogBots, "[PHOEBE] {}=UNKNOWN available=false owner_valid={}; no flag write", Member, Valid(Object));
++        }
++    }
++}
++
++void PhoebeInitialLock(UObject* World, UObject* Navigation)
++{
++    auto Fn = FindObject<UFunction>(L"/Script/FortniteGame.AthenaNavSystem.IsInitialNavigationLockActive");
++    PhoebeSchema("AthenaNavSystem.IsInitialNavigationLockActive", Fn);
++    ReflectedCall InstanceCall;
++    ReflectedCall StaticCall;
++    bool Value = false, Available = false;
++    const char* Route = "signature/receiver unavailable";
++    if (IsOf(Navigation, L"/Script/FortniteGame.AthenaNavSystem") && Valid(Fn)
++        && Fn->OuterPrivate == FindObject<UClass>(L"/Script/FortniteGame.AthenaNavSystem")
++        && InstanceCall.Init(Fn, {"ReturnValue"}) && InstanceCall.Put("ReturnValue", false))
++    {
++        InstanceCall.Invoke(Navigation);
++        Available = InstanceCall.Return(Value);
++        Route = "exact ReturnValue-only instance getter";
++    }
++    else
++    {
++        auto Receiver = NavStaticReceiver(Fn, L"/Script/FortniteGame.Default__AthenaNavSystem");
++        if (Receiver && StaticCall.Init(Fn, {"WorldContextObject", "ReturnValue"})
++            && StaticCall.Put("WorldContextObject", World) && StaticCall.Put("ReturnValue", false))
++        {
++            StaticCall.Invoke(Receiver);
++            Available = StaticCall.Return(Value);
++            Route = "exact WorldContextObject/ReturnValue getter on existing owner CDO";
++        }
++    }
++    LOG_INFO(LogBots, "[PHOEBE] initial_lock available={} value={} route={}; lock owner/reason bits UNKNOWN; no unlock",
++        Available, Available ? (Value ? "true" : "false") : "UNKNOWN", Route);
++}
++
++void PhoebeNavConfig(UObject* Object, const char* Label)
++{
++    PhoebeObject(Label, Object);
++    if (!Valid(Object)) return;
++    FName Name;
++    const bool HasName = Read(Object, "DefaultAgentName", Name);
++    LOG_INFO(LogBots, "[PHOEBE] {} default_agent_available={} name={}", Label, HasName, HasName ? Name.ToString() : "UNKNOWN");
++    PhoebeFlags(Object, {"bInitialBuildingLocked", "bAutoCreateNavigationData", "bAutoSpawnMissingNavData",
++        "bUsesStreamedInNavLevel", "bAllowAutoRebuild", "bSpawnNavDataInNavBoundsLevel",
++        "bShouldDiscardSubLevelNavData", "bGenerateNavigationOnlyAroundNavigationInvokers",
++        "bUseBuildingGridAsNavigableSpace", "bUseNavigationInvokers", "bCreateOnClient", "bIsOverriden"});
++}
++
++void PhoebeStreaming(UObject* World, UObject* Playlist)
++{
++    TArray<TSoftObjectPtr<UObject>> ServerLevels{};
++    const bool HasServer = NavArray(Playlist, "AdditionalLevelsServerOnly", ServerLevels, 64);
++    LOG_INFO(LogBots, "[PHOEBE] playlist AdditionalLevelsServerOnly available={} count={}; borrowed, no load", HasServer, HasServer ? ServerLevels.ArrayNum : -1);
++    if (HasServer)
++        for (int i = 0; i < ServerLevels.ArrayNum; ++i)
++        {
++            LOG_INFO(LogBots, "[PHOEBE] playlist server_level[{}] asset={}", i, ServerLevels.Data[i].SoftObjectPtr.ObjectID.AssetPathName.ToString());
++        }
++    TArray<UObject*> Levels{};
++    const bool HasLevels = NavArray(World, "StreamingLevels", Levels, 1024);
++    LOG_INFO(LogBots, "[PHOEBE] World.StreamingLevels available={} count={}; read-only sample_limit=64", HasLevels, HasLevels ? Levels.ArrayNum : -1);
++    if (!HasLevels) return;
++    for (int i = 0; i < Levels.ArrayNum && i < 64; ++i)
++    {
++        auto Item = Levels.Data[i];
++        if (!IsOf(Item, L"/Script/Engine.LevelStreaming")) continue;
++        FName Package;
++        bool Loaded = false, Visible = false;
++        const bool HasPackage = Getter(Item, L"/Script/Engine.LevelStreaming.GetWorldAssetPackageFName", Package);
++        const bool HasLoaded = Getter(Item, L"/Script/Engine.LevelStreaming.IsLevelLoaded", Loaded);
++        const bool HasVisible = Getter(Item, L"/Script/Engine.LevelStreaming.IsLevelVisible", Visible);
++        LOG_INFO(LogBots, "[PHOEBE] streaming[{}] package={} loaded={} visible={}", i, HasPackage ? Package.ToString() : "UNKNOWN",
++            HasLoaded ? (Loaded ? "true" : "false") : "UNKNOWN", HasVisible ? (Visible ? "true" : "false") : "UNKNOWN");
++    }
++}
++
++bool PhoebeAgentMatches(UObject* Data)
++{
++    auto PawnCDO = FindObject(L"/Game/Athena/AI/Phoebe/BP_PlayerPawn_Athena_Phoebe.Default__BP_PlayerPawn_Athena_Phoebe_C");
++    auto MovementCDO = Reference(PawnCDO, "CharacterMovement");
++    const auto Props = NavStruct(MovementCDO, "NavAgentProps", L"/Script/Engine.NavAgentProperties");
++    const auto Config = NavStruct(Data, "Config", L"/Script/Engine.NavDataConfig");
++    float PawnRadius = 0, PawnHeight = 0, DataRadius = 0, DataHeight = 0;
++    const bool Available = NavRead(Props, "AgentRadius", PawnRadius) && NavRead(Props, "AgentHeight", PawnHeight)
++        && NavRead(Config, "AgentRadius", DataRadius) && NavRead(Config, "AgentHeight", DataHeight);
++    const bool Matches = Available && std::isfinite(PawnRadius) && std::isfinite(PawnHeight)
++        && std::isfinite(DataRadius) && std::isfinite(DataHeight) && PawnRadius > 0 && PawnHeight > 0
++        && std::abs(PawnRadius - DataRadius) < 0.01f && std::abs(PawnHeight - DataHeight) < 0.01f;
++    LOG_INFO(LogBots, "[PHOEBE] Phoebe CDO agent exact_dimensions_match={} values_available={} pawn_radius={} pawn_height={} nav_radius={} nav_height={}; conservative gate, no native agent-selection claim",
++        Matches, Available, PawnRadius, PawnHeight, DataRadius, DataHeight);
++    return Matches;
++}
++
++bool PhoebePath(UObject* World, UObject* Data, const FVector& Start, const FVector& End)
++{
++    auto Fn = FindObject<UFunction>(L"/Script/NavigationSystem.NavigationSystemV1.FindPathToLocationSynchronously");
++    auto Receiver = NavStaticReceiver(Fn, L"/Script/NavigationSystem.Default__NavigationSystemV1");
++    ReflectedCall Call;
++    UObject* Path = nullptr;
++    if (!Receiver || !Call.Init(Fn, {"WorldContextObject", "PathStart", "PathEnd", "PathfindingContext", "FilterClass", "ReturnValue"})
++        || !Call.Put("WorldContextObject", World) || !Call.Put("PathStart", Start) || !Call.Put("PathEnd", End)
++        || !Call.Put("PathfindingContext", Data) || !Call.Put("FilterClass", static_cast<UObject*>(nullptr))
++        || !Call.Put("ReturnValue", Path)) return false;
++    Call.Invoke(Receiver); // One native path query; no movement command or actor creation.
++    bool IsValidPath = false, Partial = true;
++    TArray<FVector> Points{};
++    const bool Usable = Call.Return(Path) && IsOf(Path, L"/Script/NavigationSystem.NavigationPath")
++        && Getter(Path, L"/Script/NavigationSystem.NavigationPath.IsValid", IsValidPath) && IsValidPath
++        && Getter(Path, L"/Script/NavigationSystem.NavigationPath.IsPartial", Partial) && !Partial
++        && NavArray(Path, "PathPoints", Points, 10000) && Points.ArrayNum >= 2;
++    LOG_INFO(LogBots, "[PHOEBE] Phoebe NavData explicit_context path_usable={} partial={} points={}; native query only", Usable, Partial, Points.ArrayNum);
++    return Usable;
++}
++
+ void PhoebeBlocked(const char* Reason)
+ {
+     LOG_INFO(LogBots, "[PHOEBE][FAIL] stage={} reason={}; no spawn, no fallback, no automatic retry", Stage, Reason);
+@@ -58,9 +216,10 @@ void ProcessNativePhoebe(UNetDriver* Driver)
+     if (Reference(World, "NetDriver") != Driver) return; // Secondary drivers cannot consume the request.
+     auto Expected = State::QueuedNative;
+     if (!CurrentState.compare_exchange_strong(Expected, State::Running)) return;
++    PhoebeActionScope ActionScope;
+     ContextWorld = World;
+     ContextMode = ContextState = ContextManager = nullptr;
+-    LOG_INFO(LogBots, "[PHOEBE] bootstrap begin mode=preflight-only tick_thread={}; no authority mutation", GetCurrentThreadId());
++    LOG_INFO(LogBots, "[PHOEBE] bootstrap begin revision=native-phoebe-bootstrap-v1 tick_thread={}; navigation first, exactly one explicit request", GetCurrentThreadId());
+     if (Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001
+         || !Globals::bStartedListening || World->GetName() != "Apollo_Terrain")
+     { PhoebeBlocked("requires listening Apollo 13.40 / engine 426"); return; }
+@@ -94,7 +253,11 @@ void ProcessNativePhoebe(UNetDriver* Driver)
+     auto AISettings = Reference(Playlist, "AISettings");
+     if (!IsOf(AISettings, L"/Script/FortniteGame.AthenaAISettings")) AISettings = nullptr;
+     PhoebeObject("Playlist.AISettings (existing only)", AISettings);
+-    for (const char* Member : {"bAllowAIGoalManager", "bAllowAIDirector", "BotSettings", "BotPopulation", "BotSpawnerData"})
++    if (!Valid(Playlist) || !Valid(AISettings))
++    { Stage = "playlist_ai_settings"; PhoebeBlocked("effective playlist or native AISettings unavailable"); return; }
++    PhoebeFlags(AISettings, {"bAllowAIGoalManager", "bAllowAIDirector"});
++    LOG_INFO(LogBots, "[PHOEBE] GoalManager/Director initialization=not justified for isolated BR bot; playlist flags are permissions, not proof of dependency; created=0");
++    for (const char* Member : {"BotSettings", "BotPopulation", "BotSpawnerData"})
+         PhoebePresence(AISettings, Member);
+     auto ControllerCDO = FindObject(L"/Game/Athena/AI/Phoebe/BP_PhoebePlayerController.Default__BP_PhoebePlayerController_C");
+     PhoebeObject("Controller CDO (not spawned Controller)", ControllerCDO);
+@@ -112,7 +275,14 @@ void ProcessNativePhoebe(UNetDriver* Driver)
+     PhoebeSchema("Manager.SpawnBot", FindObject<UFunction>(L"/Script/FortniteGame.FortServerBotManagerAthena.SpawnBot"));
+     PhoebeSchema("RuntimeCustomizationData", FindObject<UStruct>(L"/Script/FortniteGame.FortAthenaAIBotRunTimeCustomizationData"));
+     PhoebeSchema("AIController.RunBehaviorTree", FindObject<UFunction>(L"/Script/AIModule.AIController.RunBehaviorTree"));
+-    LOG_INFO(LogBots, "[PHOEBE] native_spawn_contract_ready=false; local RuntimeCustomizationData wrapper empty, native original intercepted; fixed-address helper not called");
++    for (const char* Member : {"CreateComponentList", "CreateComponentListFromClass", "GetBehaviorComponent", "GetSpawnParamsComponent"})
++    {
++        const auto Path = std::string("/Script/FortniteGame.FortAthenaAISpawnerData.") + Member;
++        PhoebeSchema(Member, FindObject<UFunction>(Path));
++    }
++    PhoebeSchema("ComponentList.GetList", FindObject<UFunction>(L"/Script/FortniteGame.FortAthenaAISpawnerDataComponentList.GetList"));
++    PhoebeSchema("FortKismetLibrary.GetNavigationDataForActor", FindObject<UFunction>(L"/Script/FortniteGame.FortKismetLibrary.GetNavigationDataForActor"));
++    LOG_INFO(LogBots, "[PHOEBE] SpawnAI component pipeline preferred for investigation; generic BR SpawnerData/profile and full type/ownership contract unresolved; no creation/call");
+ 
+     Stage = "PHOEBE inspect registered nav";
+     auto Navigation = Reference(World, "NavigationSystem");
+@@ -136,11 +306,64 @@ void ProcessNativePhoebe(UNetDriver* Driver)
+     const bool HasBuilding = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuilt", Building);
+     const bool HasLocked = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuiltOrLocked", BuildingOrLocked);
+     LOG_INFO(LogBots, "[PHOEBE] building_available={} building={} building_or_locked_available={} building_or_locked={}; no unlock/rebuild", HasBuilding, Building, HasLocked, BuildingOrLocked);
+-    if (!Available || !HasAthenaData)
++    PhoebeInitialLock(World, Navigation);
++    PhoebeNavConfig(Navigation, "effective AthenaNavSystem flags");
++    UObject* WorldSettings = nullptr;
++    Getter(World, L"/Script/Engine.World.K2_GetWorldSettings", WorldSettings);
++    if (!Valid(WorldSettings)) WorldSettings = Reference(Reference(World, "PersistentLevel"), "WorldSettings");
++    PhoebeObject("WorldSettings", WorldSettings);
++    PhoebeNavConfig(Reference(WorldSettings, "NavigationSystemConfig"), "WorldSettings.NavigationSystemConfig");
++    PhoebeNavConfig(Reference(WorldSettings, "NavigationSystemConfigOverride"), "WorldSettings.NavigationSystemConfigOverride");
++    PhoebeNavConfig(Reference(AISettings, "NavigationSystemConfig"), "AISettings.NavigationSystemConfig candidate");
++    PhoebeStreaming(World, Playlist);
++    LOG_INFO(LogBots, "[PHOEBE] nav setup begin policy=validate-existing; helper rejected by static evidence");
++    LOG_INFO(LogBots, "[PHOEBE] nav data before count={}", Available ? Data.ArrayNum : -1);
++    LOG_INFO(LogBots, "[PHOEBE] SetupNavConfig result=NOT_CALLED reason=existing AthenaNavSystem early-return; AddNavigationSystemToWorld has no 426 resolver; MANG is not validated Phoebe config");
++    TArray<UObject*> After{};
++    const bool HasAfter = IsOf(Navigation, L"/Script/NavigationSystem.NavigationSystemV1") && NavArray(Navigation, "NavDataSet", After, 1000);
++    UObject* PhoebeData = nullptr;
++    bool AthenaRegistered = false;
++    if (HasAfter)
++        for (int i = 0; i < After.ArrayNum; ++i)
++        {
++            auto Item = After.Data[i];
++            if (!IsOf(Item, L"/Script/FortniteGame.AthenaNavMesh")) continue;
++            AthenaRegistered = true;
++            FName ConfigName;
++            if (NavRead(NavStruct(Item, "Config", L"/Script/Engine.NavDataConfig"), "Name", ConfigName) && ConfigName.ToString() == "Phoebe")
++                PhoebeData = Item;
++        }
++    LOG_INFO(LogBots, "[PHOEBE] nav data after count={} available={}", HasAfter ? After.ArrayNum : -1, HasAfter);
++    LOG_INFO(LogBots, "[PHOEBE] AthenaNavMesh registered={} Phoebe agent NavData={} selected_by=registered AthenaNavMesh.Config.Name; agent dimensions/tiles not yet validated", AthenaRegistered, Valid(PhoebeData));
++    Stage = "navigation_bootstrap";
++    if (!HasAfter || After.ArrayNum == 0 || !AthenaRegistered || !Valid(PhoebeData) || !PhoebeAgentMatches(PhoebeData))
+     {
+-        LOG_INFO(LogBots, "[PHOEBE][FAIL] stage=registered_nav reason=no validated registered AthenaNavMesh; no creation/replacement/unlock");
++        NativeResult.store(PhoebeResult::NavBlocked);
++        PhoebeBlocked("no registered Phoebe AthenaNavMesh; no evidenced 13.40 initialization; stop before spawn");
++        LOG_INFO(LogBots, "[PHOEBE] result=PHOEBE-V1 NAV-BLOCKED spawned=0 Brain/BT/AI-0..7=NOT_TESTED");
++        return;
++    }
++    // Membership/name alone do not establish Phoebe usability. Probe a single
++    // human-relative 15m point, never alter movement or create an actor here.
++    Stage = "navigation_projection";
++    auto Origin = Human->GetActorLocation(); // Upstream FVector arithmetic operators are not const-qualified.
++    const auto Point = Origin + Human->GetActorRightVector() * 1500.f;
++    if (!Finite(Origin) || !Finite(Point)) { PhoebeBlocked("non-finite human-relative point"); return; }
++    const auto Extent = NavExtent(PhoebeData);
++    const auto Projection = NavProject(World, PhoebeData, nullptr, Point, Extent, "PhoebeCandidate");
++    const auto HumanProjection = NavProject(World, PhoebeData, nullptr, Origin, Extent, "HumanOnPhoebeData");
++    Stage = "navigation_bootstrap";
++    if (!Projection.Available || !Projection.Success || !HumanProjection.Available || !HumanProjection.Success
++        || Distance(Origin, Projection.Location) < 1000.0 || Distance(Origin, Projection.Location) > 2000.0
++        || !PhoebePath(World, PhoebeData, HumanProjection.Location, Projection.Location))
++    {
++        NativeResult.store(PhoebeResult::NavBlocked);
++        PhoebeBlocked("registered candidate has no validated projection/path within 10-20m; stop before spawn");
++        LOG_INFO(LogBots, "[PHOEBE] result=PHOEBE-V1 NAV-BLOCKED spawned=0");
++        return;
+     }
+-    Stage = "PHOEBE native_spawn_contract";
+-    PhoebeBlocked("native SpawnAI/SpawnBot argument types/defaults/ownership and original path not yet validated; bootstrap NOT activated");
+-    LOG_INFO(LogBots, "[PHOEBE] preflight complete status=PARTIAL spawned=0 Brain/behavior=NOT_TESTED; restart host for OFF baseline");
++    Stage = "spawn_contract_validation";
++    NativeResult.store(PhoebeResult::SpawnBlocked);
++    PhoebeBlocked("generic BR native SpawnerData/profile, property types and original spawn route remain unresolved; no fabricated data");
++    LOG_INFO(LogBots, "[PHOEBE] result=PHOEBE-V1 SPAWN-BLOCKED navigation=registered/Phoebe-CDO-dimensions/projections/path-validated contract=unvalidated spawned=0; no native spawn enabled in this revision");
+ }
+diff --git a/Project Reboot 3.0/gui.h b/Project Reboot 3.0/gui.h
+index 311396d..ba5fc61 100644
+--- a/Project Reboot 3.0/gui.h	
++++ b/Project Reboot 3.0/gui.h	
+@@ -729,19 +729,22 @@ static inline void MainUI()
+ 				if (ImGui::Checkbox("Native Phoebe AI", &NativePhoebe))
+ 					Bot0::SetNativePhoebeEnabled(NativePhoebe);
+ 				if (NativePhoebe)
+-					ImGui::TextWrapped("PARTIAL: native pipeline preflight only. Missing nav/spawn contract prevents AI spawn; inspect [PHOEBE] logs.");
++					ImGui::TextWrapped("V1: stops before spawn if Phoebe navigation or native data is unavailable. AI bootstrap is not validated yet.");
+ 				if (ImGui::Button("Spawn 1 Bot"))
+ 					Bot0::RequestSpawn();
+ 				if (ImGui::Button("Dump Bot State"))
+ 					Bot0::RequestDump();
+-				if (ImGui::Button("Move Bot To Player"))
+-					Bot0::RequestMove();
+-				if (ImGui::Button("Dump Nav State"))
+-					Bot0::RequestNavDump();
+-				if (ImGui::Button("Test Nav Projection"))
+-					Bot0::RequestNavProjection();
+-				if (ImGui::Button("Test Path To Player"))
+-					Bot0::RequestNavPath();
++				if (ImGui::CollapsingHeader("Advanced / Diagnostics"))
++				{
++					if (!NativePhoebe && ImGui::Button("Move Bot To Player"))
++						Bot0::RequestMove();
++					if (ImGui::Button("Dump Nav State"))
++						Bot0::RequestNavDump();
++					if (ImGui::Button("Test Nav Projection"))
++						Bot0::RequestNavProjection();
++					if (ImGui::Button("Test Path To Player"))
++						Bot0::RequestNavPath();
++				}
+ 				ImGui::TextWrapped("%s", Bot0::Status());
+ 				ImGui::Separator();
+ 

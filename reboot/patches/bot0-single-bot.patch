@@ -1,0 +1,383 @@
+diff --git a/Project Reboot 3.0/Bot0.cpp b/Project Reboot 3.0/Bot0.cpp
+new file mode 100644
+index 0000000..862b186
+--- /dev/null
++++ b/Project Reboot 3.0/Bot0.cpp	
+@@ -0,0 +1,287 @@
++#include "Bot0.h"
++
++#include <atomic>
++#include <cmath>
++#include "reboot.h"
++#include "NetDriver.h"
++#include "NetConnection.h"
++#include "World.h"
++#include "UObjectArray.h"
++#include "FortGameModeAthena.h"
++#include "FortAthenaMutator_Bots.h"
++#include "FortPlayerPawnAthena.h"
++#include "log.h"
++
++namespace Bot0
++{
++    namespace
++    {
++        enum class State { Idle, Queued, Running, Complete, Partial };
++        std::atomic<State> CurrentState{State::Idle};
++        bool SpawnAttempted = false; // Only accessed in the existing server TickFlush context.
++        const char* Stage = "idle";
++        UObject* ContextWorld = nullptr;
++        UObject* ContextMode = nullptr;
++        UObject* ContextState = nullptr;
++        UObject* ContextManager = nullptr;
++
++        bool Valid(UObject* Object)
++        {
++            // Best-effort checks, not a substitute for UE lifetime management.
++            if (!Object || IsBadReadPtr(Object, sizeof(UObject)) || !Object->ClassPrivate
++                || IsBadReadPtr(Object->ClassPrivate, sizeof(UObject)) || !Object->IsValidLowLevel()) return false;
++            auto Item = GetItemByIndex(Object->InternalIndex);
++            return Item && !IsBadReadPtr(Item, sizeof(FUObjectItem)) && Item->Object == Object && !Item->IsPendingKill();
++        }
++
++        bool IsOf(UObject* Object, const wchar_t* ClassPath)
++        {
++            auto Class = FindObject<UClass>(ClassPath);
++            return Valid(Object) && Valid(Class) && Object->IsA(Class);
++        }
++
++        bool DerivesFrom(UStruct* Class, UStruct* Base)
++        {
++            for (int i = 0; i < 64 && Valid(Class); ++i, Class = Class->GetSuperStruct())
++                if (Class == Base) return true;
++            return false;
++        }
++
++        template<typename T>
++        bool Read(UObject* Object, const char* Property, T& Value)
++        {
++            if (!Valid(Object)) return false;
++            const int Offset = Object->GetOffset(Property, false);
++            if (Offset < 0 || IsBadReadPtr(reinterpret_cast<char*>(Object) + Offset, sizeof(T))) return false;
++            Value = Object->Get<T>(Offset);
++            return true;
++        }
++
++        UObject* Reference(UObject* Object, const char* Property)
++        {
++            UObject* Value = nullptr;
++            Read(Object, Property, Value);
++            return Value;
++        }
++
++        void Refuse(const char* Reason)
++        {
++            LOG_INFO(LogBots, "[BOT][FAIL] Spawn refused: {} stage={}", Reason, Stage);
++            CurrentState.store(State::Idle);
++        }
++
++        void LogObject(const char* Label, UObject* Object)
++        {
++            LOG_INFO(LogBots, "[BOT] {}: 0x{:x} name={}", Label, reinterpret_cast<uintptr_t>(Object),
++                Valid(Object) ? Object->GetName() : "invalid/null");
++        }
++
++        int ArrayCount(UObject* Object, const char* Property)
++        {
++            if (!Valid(Object)) return -1;
++            const int Offset = Object->GetOffset(Property, false);
++            if (Offset < 0 || IsBadReadPtr(reinterpret_cast<char*>(Object) + Offset, sizeof(TArray<UObject*>))) return -1;
++            const auto& Array = Object->Get<TArray<UObject*>>(Offset);
++            return Array.ArrayNum >= 0 && Array.ArrayNum <= Array.ArrayMax ? Array.ArrayNum : -1;
++        }
++
++        void LogCounts(const char* When)
++        {
++            int PlayersLeft = -1, NumPlayers = -1;
++            Read(ContextState, "PlayersLeft", PlayersLeft);
++            Read(ContextMode, "NumPlayers", NumPlayers);
++            LOG_INFO(LogBots, "[BOT] counts {} PlayersLeft={} AlivePlayers={} NumPlayers={} PlayerArray={} (-1=unavailable)",
++                When, PlayersLeft, ArrayCount(ContextMode, "AlivePlayers"), NumPlayers, ArrayCount(ContextState, "PlayerArray"));
++        }
++
++        bool CachedContextMatches(UObject* Object)
++        {
++            UObject* Mode = nullptr;
++            if (!Read(Object, "CachedGameMode", Mode) || Mode != ContextMode) return false;
++            // CachedGameState is optional in the baseline setup; check it when reflected.
++            return Object->GetOffset("CachedGameState", false) < 0 || Reference(Object, "CachedGameState") == ContextState;
++        }
++
++        AFortPlayerPawnAthena* HumanPawn(UNetDriver* Driver)
++        {
++            if (Driver->GetOffset("ClientConnections", false) < 0) return nullptr;
++            const auto& Connections = Driver->GetClientConnections();
++            if (Connections.ArrayNum <= 0 || Connections.ArrayNum > 1000 || Connections.ArrayNum > Connections.ArrayMax
++                || !Connections.Data || IsBadReadPtr(Connections.Data, sizeof(UNetConnection*) * Connections.ArrayNum)) return nullptr;
++            for (int i = 0; i < Connections.ArrayNum; ++i)
++            {
++                auto Controller = Reference(Connections.at(i), "PlayerController");
++                if (!IsOf(Controller, L"/Script/FortniteGame.FortPlayerControllerAthena")) continue;
++                auto Pawn = Reference(Controller, "Pawn");
++                if (IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena"))
++                    return reinterpret_cast<AFortPlayerPawnAthena*>(Pawn);
++            }
++            return nullptr;
++        }
++
++        void ProcessBody(UNetDriver* Driver)
++        {
++            ContextWorld = ContextMode = ContextState = ContextManager = nullptr;
++            Stage = "validate driver/world";
++            if (!StaticFindObjectOriginal) { Refuse("reflection not initialized"); return; }
++            if (!Valid(Driver)) { Refuse("NetDriver invalid"); return; }
++            auto World = Reference(Driver, "World");
++            if (!Valid(World)) { Refuse("World invalid"); return; }
++            // Beacon/other NetDrivers must not consume the game world's queued action.
++            if (Reference(World, "NetDriver") != Driver) return;
++            State Expected = State::Queued;
++            if (!CurrentState.compare_exchange_strong(Expected, State::Running)) return;
++            ContextWorld = World;
++            LOG_INFO(LogBots, "[BOT] consuming request tick_thread={}", GetCurrentThreadId());
++            LogObject("World", World);
++            LOG_INFO(LogBots, "[BOT] version Fortnite_Version={} Engine_Version={} (expected 13.40 / 426)",
++                Fortnite_Version, Engine_Version);
++            // SetupVersion's runtime value on the validated 13.40 build is 426.
++            // Do not override that global or use the earlier documentation's UE label.
++            if (Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001)
++            { Refuse("requires Fortnite 13.40 / Reboot Engine_Version 426"); return; }
++            if (!Globals::bStartedListening || World->GetName() != "Apollo_Terrain")
++            { Refuse("requires listening Apollo_Terrain"); return; }
++            Stage = "validate Athena context";
++            ContextMode = Reference(World, "AuthorityGameMode");
++            ContextState = Reference(World, "GameState");
++            LogObject("GameMode", ContextMode);
++            LogObject("GameState", ContextState);
++            if (!IsOf(ContextMode, L"/Script/FortniteGame.FortGameModeAthena")
++                || !IsOf(ContextState, L"/Script/FortniteGame.FortGameStateAthena"))
++            { Refuse("Athena GameMode/GameState invalid"); return; }
++            EAthenaGamePhase Phase = EAthenaGamePhase::None;
++            if (!Read(ContextState, "GamePhase", Phase) || Phase != EAthenaGamePhase::SafeZones)
++            { LOG_INFO(LogBots, "[BOT] GamePhase={}", static_cast<int>(Phase)); Refuse("requires SafeZones, after bus/jump/landing"); return; }
++            Stage = "validate existing manager/mutator";
++            ContextManager = Reference(ContextMode, "ServerBotManager");
++            LogObject("BotManager", ContextManager);
++            if (!IsOf(ContextManager, L"/Script/FortniteGame.FortServerBotManagerAthena") || !CachedContextMatches(ContextManager))
++            { Refuse("existing BotManager missing or cached context mismatched"); return; }
++            auto MutatorObject = Reference(ContextManager, "CachedBotMutator");
++            LogObject("BotMutator", MutatorObject);
++            if (!IsOf(MutatorObject, L"/Script/FortniteGame.FortAthenaMutator_Bots") || !CachedContextMatches(MutatorObject))
++            { Refuse("existing BotMutator missing or cached context mismatched"); return; }
++            Stage = "validate human locator and functions";
++            auto Human = HumanPawn(Driver);
++            LogObject("HumanPawn", Human);
++            if (!Valid(Human)) { Refuse("connected human Athena Pawn missing"); return; }
++            auto SpawnFunction = FindObject<UFunction>(L"/Script/FortniteGame.FortAthenaMutator_Bots.SpawnBot");
++            if (!UObject::ProcessEventOriginal || !Valid(SpawnFunction)
++                || !Valid(FindObject<UFunction>(L"/Script/Engine.Actor.K2_GetActorLocation"))
++                || !Valid(FindObject<UFunction>(L"/Script/Engine.Actor.GetActorRightVector"))
++                || !Valid(FindObject<UFunction>(L"/Script/Engine.Actor.K2_GetActorRotation")))
++            { Refuse("required reflected function/ProcessEvent unavailable"); return; }
++            Stage = "resolve existing generic Phoebe class";
++            auto BlueprintClass = FindObject<UClass>(L"/Script/Engine.BlueprintGeneratedClass");
++            if (!Valid(BlueprintClass) || !StaticLoadObjectOriginal)
++            { Refuse("BlueprintGeneratedClass/StaticLoadObject unavailable"); return; }
++            // Exact generic asset and LoadObject pattern already present in bots.h.
++            auto PawnClass = LoadObject<UClass>(L"/Game/Athena/AI/Phoebe/BP_PlayerPawn_Athena_Phoebe.BP_PlayerPawn_Athena_Phoebe_C", BlueprintClass);
++            LogObject("PhoebePawnClass", PawnClass);
++            auto AthenaPawnClass = FindObject<UClass>(L"/Script/FortniteGame.FortPlayerPawnAthena");
++            if (!Valid(PawnClass) || !Valid(AthenaPawnClass) || !DerivesFrom(PawnClass, AthenaPawnClass))
++            { Refuse("generic Phoebe Pawn class unavailable/invalid"); return; }
++            Stage = "derive location from human Pawn";
++            auto Location = Human->GetActorLocation() + Human->GetActorRightVector() * 300.f;
++            Location.Z += 100.f;
++            const auto Rotation = Human->GetActorRotation();
++            if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) || !std::isfinite(Location.Z)
++                || !std::isfinite(Rotation.Pitch) || !std::isfinite(Rotation.Yaw) || !std::isfinite(Rotation.Roll))
++            { Refuse("non-finite spawn transform"); return; }
++            LogCounts("before");
++            LOG_INFO(LogBots, "[BOT] SpawnBot begin function=0x{:x} locator=0x{:x} location=({},{},{}) snap=false",
++                reinterpret_cast<uintptr_t>(SpawnFunction), reinterpret_cast<uintptr_t>(Human), Location.X, Location.Y, Location.Z);
++            // One native call per host session. No retry/fallback, even if it returns null.
++            if (SpawnAttempted) { Refuse("native spawn already attempted"); CurrentState.store(State::Partial); return; }
++            SpawnAttempted = true;
++            Stage = "native AFortAthenaMutator_Bots::SpawnBot";
++            auto Pawn = reinterpret_cast<AFortAthenaMutator_Bots*>(MutatorObject)->SpawnBot(PawnClass, Human, Location, Rotation, false);
++            Stage = "inspect native return";
++            LogObject("Pawn", Pawn);
++            auto Controller = Reference(Pawn, "Controller");
++            LogObject("Controller", Controller);
++            auto PlayerState = Reference(Controller, "PlayerState");
++            LogObject("PlayerState", PlayerState);
++            LogCounts("after");
++            const bool PawnValid = IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena");
++            const bool ControllerValid = IsOf(Controller, L"/Script/FortniteGame.FortAthenaAIBotController");
++            const bool Possessed = ControllerValid && Reference(Controller, "Pawn") == Pawn;
++            const bool StateValid = IsOf(PlayerState, L"/Script/Engine.PlayerState");
++            LOG_INFO(LogBots, "[BOT] result pawn_valid={} ai_controller_valid={} possessed={} player_state_valid={}",
++                PawnValid, ControllerValid, Possessed, StateValid);
++            if (PawnValid && ControllerValid && Possessed && StateValid)
++            {
++                LOG_INFO(LogBots, "[BOT] Spawn completed; verify entity/replication manually (AI behavior not validated)");
++                CurrentState.store(State::Complete);
++            }
++            else
++            {
++                LOG_INFO(LogBots, "[BOT][FAIL] reason=native return incomplete; PARTIAL; no fallback or manual registration");
++                CurrentState.store(State::Partial);
++            }
++            Stage = "finished";
++        }
++
++        void LogAddress(const char* Label, void* Address)
++        {
++            HMODULE Module = nullptr;
++            char Path[MAX_PATH]{};
++            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                reinterpret_cast<LPCSTR>(Address), &Module)) GetModuleFileNameA(Module, Path, MAX_PATH);
++            LOG_INFO(LogBots, "[BOT][FAIL] {} address=0x{:x} module={} RVA=0x{:x}", Label,
++                reinterpret_cast<uintptr_t>(Address), Module ? Path : "unknown",
++                Module ? reinterpret_cast<uintptr_t>(Address) - reinterpret_cast<uintptr_t>(Module) : 0);
++        }
++
++        LONG RecordException(EXCEPTION_POINTERS* Exception)
++        {
++            CurrentState.store(State::Partial);
++            LOG_INFO(LogBots, "[BOT][FAIL] exception=0x{:x} stage={} world=0x{:x} mode=0x{:x} state=0x{:x} manager=0x{:x}",
++                Exception->ExceptionRecord->ExceptionCode, Stage, reinterpret_cast<uintptr_t>(ContextWorld),
++                reinterpret_cast<uintptr_t>(ContextMode), reinterpret_cast<uintptr_t>(ContextState), reinterpret_cast<uintptr_t>(ContextManager));
++            LogAddress("fault", Exception->ExceptionRecord->ExceptionAddress);
++            LOG_INFO(LogBots, "[BOT][FAIL] fault_context RIP=0x{:x} RSP=0x{:x}", Exception->ContextRecord->Rip, Exception->ContextRecord->Rsp);
++            void* Frames[16]{};
++            const auto Count = CaptureStackBackTrace(0, 16, Frames, nullptr);
++            LOG_INFO(LogBots, "[BOT][FAIL] diagnostic filter stack frames={} (not symbolized fault-context unwind)", Count);
++            for (USHORT i = 0; i < Count; ++i) LogAddress("filter_stack", Frames[i]);
++            // Diagnostic only: allow the normal crash handler to receive the fault.
++            // Continuing after an unknown native engine fault could conceal corrupted state.
++            return EXCEPTION_CONTINUE_SEARCH;
++        }
++    }
++
++    void RequestSpawn()
++    {
++        State Expected = State::Idle;
++        if (CurrentState.compare_exchange_strong(Expected, State::Queued))
++        {
++            LOG_INFO(LogBots, "[BOT] Spawn 1 Bot requested ui_thread={}", GetCurrentThreadId());
++        }
++        else
++        {
++            LOG_INFO(LogBots, "[BOT][FAIL] Spawn refused: request pending or this host already attempted BOT-0");
++        }
++    }
++
++    const char* Status()
++    {
++        switch (CurrentState.load())
++        {
++        case State::Queued: return "Queued for server TickFlush";
++        case State::Running: return "Native spawn attempt running";
++        case State::Complete: return "Native return complete; verify in client. Restart host for another test.";
++        case State::Partial: return "Partial/failure; inspect [BOT] logs. Restart host for another test.";
++        default: return "Manual BOT-0 only: land safely, then click once.";
++        }
++    }
++
++    void ProcessPending(UNetDriver* NetDriver)
++    {
++        if (CurrentState.load() != State::Queued) return;
++        // Kept separate from functions with C++ locals for MSVC SEH compatibility.
++        __try { ProcessBody(NetDriver); }
++        __except (RecordException(GetExceptionInformation())) {}
++    }
++}
+diff --git a/Project Reboot 3.0/Bot0.h b/Project Reboot 3.0/Bot0.h
+new file mode 100644
+index 0000000..f2b5c0b
+--- /dev/null
++++ b/Project Reboot 3.0/Bot0.h	
+@@ -0,0 +1,10 @@
++#pragma once
++
++class UNetDriver;
++
++namespace Bot0
++{
++    void RequestSpawn();
++    const char* Status();
++    void ProcessPending(UNetDriver* NetDriver);
++}
+diff --git a/Project Reboot 3.0/NetDriver.cpp b/Project Reboot 3.0/NetDriver.cpp
+index 009d7b5..7858f0b 100644
+--- a/Project Reboot 3.0/NetDriver.cpp	
++++ b/Project Reboot 3.0/NetDriver.cpp	
+@@ -11,6 +11,7 @@
+ #include "AssertionMacros.h"
+ #include "bots.h"
+ #include "gui.h"
++#include "Bot0.h"
+ 
+ enum class EChannelCloseReason : uint8
+ {
+@@ -42,6 +43,8 @@ void UNetDriver::RemoveNetworkActor(AActor* Actor)
+ 
+ void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
+ {
++	Bot0::ProcessPending(NetDriver);
++
+ 	if (bShouldDestroyAllPlayerBuilds) // i hate this
+ 	{
+ 		auto AllBuildingSMActors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABuildingSMActor::StaticClass());
+@@ -915,4 +918,4 @@ int32 UNetDriver::ServerReplicateActors()
+ 	*/
+ 
+ 	return Updated;
+-}
+\ No newline at end of file
++}
+diff --git a/Project Reboot 3.0/Project Reboot 3.0.vcxproj b/Project Reboot 3.0/Project Reboot 3.0.vcxproj
+index fced625..98cd1f2 100644
+--- a/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
++++ b/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
+@@ -188,6 +188,7 @@
+     <ClCompile Include="addresses.cpp" />
+     <ClCompile Include="AthenaMarkerComponent.cpp" />
+     <ClCompile Include="BP_IslandScripting.cpp" />
++    <ClCompile Include="Bot0.cpp" />
+     <ClCompile Include="BuildingActor.cpp" />
+     <ClCompile Include="BuildingContainer.cpp" />
+     <ClCompile Include="BuildingFoundation.cpp" />
+@@ -303,6 +304,7 @@
+     <ClInclude Include="BinaryHeap.h" />
+     <ClInclude Include="BitArray.h" />
+     <ClInclude Include="botnames.h" />
++    <ClInclude Include="Bot0.h" />
+     <ClInclude Include="bots.h" />
+     <ClInclude Include="BP_IslandScripting.h" />
+     <ClInclude Include="BuildingActor.h" />
+diff --git a/Project Reboot 3.0/gui.h b/Project Reboot 3.0/gui.h
+index 79b115a..f95a57a 100644
+--- a/Project Reboot 3.0/gui.h	
++++ b/Project Reboot 3.0/gui.h	
+@@ -46,6 +46,7 @@
+ #include "die.h"
+ #include "calendar.h"
+ #include "KismetRenderingLibrary.h"
++#include "Bot0.h"
+ 
+ #define GAME_TAB 1
+ #define PLAYERS_TAB 2
+@@ -722,6 +723,13 @@ static inline void MainUI()
+ 			{
+ 				StaticUI();
+ 
++				ImGui::Separator();
++				ImGui::TextUnformatted("Bots");
++				if (ImGui::Button("Spawn 1 Bot"))
++					Bot0::RequestSpawn();
++				ImGui::TextWrapped("%s", Bot0::Status());
++				ImGui::Separator();
++
+ 				if (!bStartedBus)
+ 				{
+ 					bool bWillBeLategame = Globals::bLateGame.load();

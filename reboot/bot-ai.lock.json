@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "version": "13.40",
+    "changelist": 14113327,
+    "rebootRuntimeEngineVersion": 426
+  },
+  "upstream": {
+    "url": "https://github.com/Milxnor/Project-Reboot-3.0.git",
+    "commit": "10c659028ad9d6816f78226483f11a884bf81f57"
+  },
+  "sourceSnapshot": {
+    "localBranch": "bot-ai/native-phoebe-bootstrap-v1",
+    "localCommit": "bd627dbcc5ef5887ab7a939d97617726cd7057b1",
+    "publishedAs": "Ordered cumulative patches; local milestone commits/tags are not upstream refs"
+  },
+  "orderedPatches": [
+    {
+      "path": "reboot/patches/reboot3-build-compat.patch",
+      "sha256": "038f5b42e55aaba7bb21328c1907f0a4a1de5059386ae32453aeb6a8e83c43f7"
+    },
+    {
+      "path": "reboot/patches/bot0-single-bot.patch",
+      "sha256": "8a351fe42c83ccca584f7a338493b3e37b7ebdf70cb1303e1326970761661a9d"
+    },
+    {
+      "path": "reboot/patches/bot1-manual-move.patch",
+      "sha256": "ea560dc4dd12b16898aad2c610b04fa5d5ae2cd65dba5e9687d9c19c4411bcca"
+    },
+    {
+      "path": "reboot/patches/bot2-nav-diagnostics.patch",
+      "sha256": "05c8a3f169b294f6c79a6ee65b8c66850a498382ca08dbc3aa31bb1b626b3faa"
+    },
+    {
+      "path": "reboot/patches/native-phoebe-bootstrap.patch",
+      "sha256": "62185304001a590b5aad88e502952444470f51e5abdae0c494c342b4606770c2"
+    },
+    {
+      "path": "reboot/patches/native-phoebe-bootstrap-v1.patch",
+      "sha256": "353ccdb7582408fc688a8fd69cc84f7ed264d7878ced38c5b6e044776c4b8140"
+    }
+  ],
+  "reproductionVerified": {
+    "method": "git apply --check followed by apply on pinned upstream audit checkout; compared all affected files to local source",
+    "affectedFiles": 7,
+    "buildConfiguration": "Release x64 / v143 14.44.35207 / SDK 10.0.26100.0 / no ABOVE_S20",
+    "projectBuildSettingsUnchanged": true,
+    "bot0OffSpawnBodyUnchanged": true
+  },
+  "artifacts": {
+    "dll": {
+      "path": "reboot/artifacts/reboot3/native-phoebe-bootstrap-v1/Project Reboot 3.0.dll",
+      "bytes": 3155968,
+      "sha256": "9010a6ef53c3ef705b6f567948a8bf21d1f7d82b06aef9ff4f15b3e2cf41c824"
+    },
+    "pdb": {
+      "path": "reboot/artifacts/reboot3/native-phoebe-bootstrap-v1/Project Reboot 3.0.pdb",
+      "bytes": 27324416,
+      "sha256": "707810b30f7dbb8b988f41a2f578d5011b74731f7b549ba83edd6f664208ad70"
+    }
+  },
+  "codeView": {
+    "guid": "98d93622-175e-4aac-a939-3edfc7d80551",
+    "age": 2,
+    "pdbMatch": true
+  },
+  "nativePhoebe": {
+    "defaultEnabled": false,
+    "nativeSpawnEnabled": false,
+    "maximumExplicitRequestsPerHost": 1,
+    "classification": "PHOEBE-V1 NAV-BLOCKED",
+    "userTestedAtLocal": "2026-10-08T10:46:38-03:00",
+    "spawned": 0,
+    "navDataBefore": 0,
+    "navDataAfter": 0,
+    "initialLockActive": false,
+    "waterNavigationVariantsLoaded": false,
+    "aiCapabilities": {
+      "AI-0": "NOT_TESTED",
+      "AI-1": "NOT_TESTED",
+      "AI-2": "NOT_TESTED",
+      "AI-3": "NOT_TESTED",
+      "AI-4": "NOT_TESTED",
+      "AI-5": "NOT_TESTED",
+      "AI-6": "NOT_TESTED",
+      "AI-7": "NOT_TESTED"
+    }
+  },
+  "runtimeEvidence": "docs/evidence/native-phoebe-v1-runtime-excerpts.txt",
+  "implementationGuide": "docs/NATIVE_PHOEBE_BOOTSTRAP_V1.md",
+  "testGuide": "docs/NATIVE_PHOEBE_BOOTSTRAP_V1_TEST.md"
+}

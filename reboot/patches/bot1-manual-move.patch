@@ -1,0 +1,486 @@
+diff --git a/Project Reboot 3.0/Bot0.cpp b/Project Reboot 3.0/Bot0.cpp
+index 862b186..301b261 100644
+--- a/Project Reboot 3.0/Bot0.cpp	
++++ b/Project Reboot 3.0/Bot0.cpp	
+@@ -2,6 +2,12 @@
+ 
+ #include <atomic>
+ #include <cmath>
++#include <cstring>
++#include <initializer_list>
++#include <type_traits>
++#include <utility>
++#include <vector>
++#include "WeakObjectPtr.h"
+ #include "reboot.h"
+ #include "NetDriver.h"
+ #include "NetConnection.h"
+@@ -25,6 +31,31 @@ namespace Bot0
+         UObject* ContextState = nullptr;
+         UObject* ContextManager = nullptr;
+ 
++        enum class DebugAction { None, Dump, Move };
++        std::atomic<DebugAction> PendingDebug{DebugAction::None};
++
++        struct DebugReference
++        {
++            FWeakObjectPtr Weak{-1, 0};
++            UObject* Expected = nullptr; // Identity only; never dereferenced without registry validation.
++            FName Name;
++        };
++
++        struct DebugBotState
++        {
++            DebugReference World, GameState, Manager, Controller, Pawn, PlayerState;
++        };
++        DebugBotState LastBot;
++        struct MoveObservation
++        {
++            bool Active = false;
++            ULONGLONG Started = 0;
++            unsigned NextSecond = 1;
++            FVector InitialLocation{};
++            FVector TargetLocation{};
++        };
++        MoveObservation Observation; // Server tick only; at most 5 seconds per explicit move click.
++
+         bool Valid(UObject* Object)
+         {
+             // Best-effort checks, not a substitute for UE lifetime management.
+@@ -34,6 +65,31 @@ namespace Bot0
+             return Item && !IsBadReadPtr(Item, sizeof(FUObjectItem)) && Item->Object == Object && !Item->IsPendingKill();
+         }
+ 
++        DebugReference Remember(UObject* Object)
++        {
++            DebugReference Result;
++            if (Valid(Object))
++            {
++                auto Item = GetItemByIndex(Object->InternalIndex);
++                Result.Weak = {Object->InternalIndex, Item->SerialNumber};
++                Result.Expected = Object;
++                Result.Name = Object->GetFName();
++            }
++            return Result;
++        }
++
++        UObject* Resolve(const DebugReference& Ref)
++        {
++            if (!Ref.Expected || Ref.Weak.ObjectIndex < 0) return nullptr;
++            auto Item = GetItemByIndex(Ref.Weak.ObjectIndex);
++            if (!Item || IsBadReadPtr(Item, sizeof(FUObjectItem)) || Item->Object != Ref.Expected
++                || Item->SerialNumber != Ref.Weak.ObjectSerialNumber || !Valid(Item->Object)) return nullptr;
++            const auto Name = Item->Object->GetFName();
++            // The upstream FName equality ignores Number; compare it explicitly.
++            return Name.ComparisonIndex.Value == Ref.Name.ComparisonIndex.Value && Name.Number == Ref.Name.Number
++                ? Item->Object : nullptr;
++        }
++
+         bool IsOf(UObject* Object, const wchar_t* ClassPath)
+         {
+             auto Class = FindObject<UClass>(ClassPath);
+@@ -203,6 +259,8 @@ namespace Bot0
+             LogObject("Controller", Controller);
+             auto PlayerState = Reference(Controller, "PlayerState");
+             LogObject("PlayerState", PlayerState);
++            LastBot = {Remember(ContextWorld), Remember(ContextState), Remember(ContextManager),
++                Remember(Controller), Remember(Pawn), Remember(PlayerState)};
+             LogCounts("after");
+             const bool PawnValid = IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena");
+             const bool ControllerValid = IsOf(Controller, L"/Script/FortniteGame.FortAthenaAIBotController");
+@@ -223,6 +281,328 @@ namespace Bot0
+             Stage = "finished";
+         }
+ 
++        // Use the baseline's function reflection, not a guessed C++ params struct.
++        // Only exact native parameter sets are accepted; all offsets/sizes come from UFunction.
++        class ReflectedCall
++        {
++            UFunction* Function = nullptr;
++            std::vector<uint8_t> Bytes;
++            std::vector<std::pair<int, int>> Occupied;
++            bool LogParameters = false;
++        public:
++            bool Init(UFunction* Fn, std::initializer_list<const char*> Expected, bool TraceParameters = false)
++            {
++                if (!Valid(Fn) || !UObject::ProcessEventOriginal) return false;
++                const int Size = Fn->GetPropertiesSize();
++                if (Size <= 0 || Size > 512) return false;
++                auto Field = Fn->Get<void*>(Offsets::Children);
++                size_t Count = 0;
++                while (Field && Count <= Expected.size())
++                {
++                    if (IsBadReadPtr(Field, Offsets::Offset_Internal + sizeof(int))) return false;
++                    const auto Name = GetFNameOfProp(Field)->ToString();
++                    bool Known = false;
++                    for (const char* Member : Expected) if (Name == Member) Known = true;
++                    if (!Known) return false;
++                    ++Count;
++                    Field = GetNext(Field);
++                }
++                if (Field || Count != Expected.size()) return false;
++                for (const char* Member : Expected) if (Fn->GetOffsetFunc(Member, false) < 0) return false;
++                Function = Fn;
++                LogParameters = TraceParameters;
++                Bytes.assign(Size, 0);
++                return true;
++            }
++
++            template<typename T>
++            bool Put(const char* Member, const T& Value)
++            {
++                const int Offset = Function->GetOffsetFunc(Member, false);
++                const int End = Offset + static_cast<int>(sizeof(T));
++                if (Offset < 0 || End > static_cast<int>(Bytes.size())) return false;
++                for (const auto& Range : Occupied) if (Offset < Range.second && End > Range.first) return false;
++                if constexpr (std::is_same_v<T, bool>)
++                {
++                    // Native bool parameters only; do not guess packed bool/ByteOffset layout.
++                    if (GetFieldMask(Function->GetPropertyFunc(Member, false)) != 0xFF) return false;
++                }
++                std::memcpy(Bytes.data() + Offset, &Value, sizeof(T));
++                Occupied.emplace_back(Offset, End);
++                if (LogParameters)
++                {
++                    LOG_INFO(LogBots, "[BOT] reflected param {} offset={} bytes={}", Member, Offset, sizeof(T));
++                }
++                return true;
++            }
++
++            template<typename T>
++            bool Return(T& Value)
++            {
++                const int Offset = Function->GetOffsetFunc("ReturnValue", false);
++                if (Offset < 0 || Offset + sizeof(T) > Bytes.size()) return false;
++                std::memcpy(&Value, Bytes.data() + Offset, sizeof(T));
++                return true;
++            }
++
++            void Invoke(UObject* Object) { Object->ProcessEvent(Function, Bytes.data()); }
++        };
++
++        template<typename T>
++        bool Getter(UObject* Object, const wchar_t* FunctionPath, T& Value)
++        {
++            if (!Valid(Object)) return false;
++            auto Fn = FindObject<UFunction>(FunctionPath);
++            if (!Valid(Fn) || !IsOf(Fn->OuterPrivate, L"/Script/CoreUObject.Class")
++                || !Object->IsA(reinterpret_cast<UClass*>(Fn->OuterPrivate))) return false;
++            ReflectedCall Call;
++            if (!Call.Init(Fn, {"ReturnValue"}) || !Call.Put("ReturnValue", T{})) return false;
++            Call.Invoke(Object);
++            return Call.Return(Value);
++        }
++
++        UObject* Movement(UObject* Pawn)
++        {
++            UObject* Result = nullptr;
++            Getter(Pawn, L"/Script/Engine.Pawn.GetMovementComponent", Result);
++            return Result;
++        }
++
++        UObject* PathFollowing(UObject* Controller)
++        {
++            UObject* Result = nullptr;
++            if (!Getter(Controller, L"/Script/AIModule.AIController.GetPathFollowingComponent", Result))
++                Result = Reference(Controller, "PathFollowingComponent");
++            return Result;
++        }
++
++        void DetailedObject(const char* Label, UObject* Object)
++        {
++            LogObject(Label, Object);
++            LOG_INFO(LogBots, "[BOT] {}Class = {}", Label,
++                Valid(Object) && Valid(Object->ClassPrivate) ? Object->ClassPrivate->GetFullName() : "unavailable");
++        }
++
++        void ComponentState(const char* Label, UObject* Component)
++        {
++            DetailedObject(Label, Component);
++            bool Active = false;
++            const bool HasActive = Getter(Component, L"/Script/Engine.ActorComponent.IsActive", Active);
++            uint8_t Mode = 0;
++            const bool HasMode = Read(Component, "MovementMode", Mode);
++            LOG_INFO(LogBots, "[BOT] {} valid={} active_available={} active={} movement_mode_available={} movement_mode={}",
++                Label, Valid(Component), HasActive, Active, HasMode, Mode);
++        }
++
++        const char* MoveStatusName(uint8_t Code)
++        {
++            // UE4 enum names; log raw value even if this build differs.
++            auto Enum = FindObject<UEnum>(L"/Script/AIModule.EPathFollowingStatus");
++            if (Valid(Enum))
++                for (const char* Name : {"Idle", "Waiting", "Paused", "Moving"})
++                    if (Enum->GetValue(Name) == Code) return Name;
++            return "Unknown";
++        }
++
++        void DumpState(UObject* World)
++        {
++            Stage = "BOT1 Dump Bot State";
++            LOG_INFO(LogBots, "[BOT] ============================== BOT STATE");
++            auto Controller = Resolve(LastBot.Controller);
++            auto Pawn = Resolve(LastBot.Pawn);
++            DetailedObject("Controller", Controller);
++            DetailedObject("Pawn", Pawn);
++            DetailedObject("PlayerState", Resolve(LastBot.PlayerState));
++            LogObject("Controller->Pawn", Reference(Controller, "Pawn"));
++            LogObject("Pawn->Controller", Reference(Pawn, "Controller"));
++            LOG_INFO(LogBots, "[BOT] possession_match={}", Valid(Controller) && Valid(Pawn)
++                && Reference(Controller, "Pawn") == Pawn && Reference(Pawn, "Controller") == Controller);
++            ComponentState("MovementComponent", Movement(Pawn));
++            ComponentState("CharacterMovement", Reference(Pawn, "CharacterMovement"));
++            ComponentState("BrainComponent", Reference(Controller, "BrainComponent"));
++            ComponentState("PathFollowingComponent", PathFollowing(Controller));
++            DetailedObject("BotManager", Resolve(LastBot.Manager));
++            DetailedObject("World", World);
++            DetailedObject("NavigationSystem", Reference(World, "NavigationSystem"));
++            LOG_INFO(LogBots, "[BOT] BotData property_present={} (opaque; not read or synthesized); spawn has no BotData argument",
++                Valid(Controller) && Controller->GetProperty("BotData", false) != nullptr);
++            uint8_t Status = 255;
++            if (Getter(Controller, L"/Script/AIModule.AIController.GetMoveStatus", Status))
++            {
++                LOG_INFO(LogBots, "[BOT] move_status={} name={}", Status, MoveStatusName(Status));
++            }
++            LOG_INFO(LogBots, "[BOT] ==============================");
++        }
++
++        AFortPlayerPawnAthena* MoveTarget(UNetDriver* Driver)
++        {
++            if (Driver->GetOffset("ClientConnections", false) < 0) return nullptr;
++            const auto& Connections = Driver->GetClientConnections();
++            if (Connections.ArrayNum <= 0 || Connections.ArrayNum > 1000 || Connections.ArrayNum > Connections.ArrayMax
++                || !Connections.Data || IsBadReadPtr(Connections.Data, sizeof(UNetConnection*) * Connections.ArrayNum)) return nullptr;
++            for (int i = 0; i < Connections.ArrayNum; ++i)
++            {
++                auto Controller = Reference(Connections.at(i), "PlayerController");
++                if (!IsOf(Controller, L"/Script/FortniteGame.FortPlayerControllerAthena")) continue;
++                auto State = Reference(Controller, "PlayerState");
++                if (!IsOf(State, L"/Script/Engine.PlayerState") || State->GetOffset("bIsABot", false) < 0
++                    || reinterpret_cast<APlayerState*>(State)->IsBot()) continue;
++                auto Pawn = Reference(Controller, "Pawn");
++                if (Pawn != Resolve(LastBot.Pawn) && IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena"))
++                    return reinterpret_cast<AFortPlayerPawnAthena*>(Pawn);
++            }
++            return nullptr;
++        }
++
++        bool Finite(const FVector& V) { return std::isfinite(V.X) && std::isfinite(V.Y) && std::isfinite(V.Z); }
++        double Distance(const FVector& A, const FVector& B)
++        {
++            const double X = A.X - B.X, Y = A.Y - B.Y, Z = A.Z - B.Z;
++            return std::sqrt(X * X + Y * Y + Z * Z);
++        }
++
++        void SampleMove(UObject* Pawn, UObject* Controller, ULONGLONG Elapsed)
++        {
++            Stage = "BOT1 bounded movement observation";
++            FVector Location{}, Velocity{};
++            const bool HasLocation = Getter(Pawn, L"/Script/Engine.Actor.K2_GetActorLocation", Location);
++            const bool HasVelocity = Getter(Pawn, L"/Script/Engine.Actor.GetVelocity", Velocity);
++            uint8_t Status = 255;
++            const bool HasStatus = Getter(Controller, L"/Script/AIModule.AIController.GetMoveStatus", Status);
++            LOG_INFO(LogBots, "[BOT] observation elapsed_ms={} location_available={} location=({},{},{}) velocity_available={} velocity=({},{},{}) move_status_available={} move_status={} status_name={} displacement={} distance_to_snapshot={}",
++                Elapsed, HasLocation, Location.X, Location.Y, Location.Z, HasVelocity, Velocity.X, Velocity.Y, Velocity.Z,
++                HasStatus, Status, HasStatus ? MoveStatusName(Status) : "unavailable",
++                HasLocation && Finite(Location) ? Distance(Location, Observation.InitialLocation) : -1.0,
++                HasLocation && Finite(Location) ? Distance(Location, Observation.TargetLocation) : -1.0);
++        }
++
++        void MoveToPlayer(UNetDriver* Driver, UObject* World)
++        {
++            Stage = "BOT1 validate movement infrastructure";
++            auto Controller = Resolve(LastBot.Controller);
++            auto Pawn = Resolve(LastBot.Pawn);
++            DetailedObject("BotController", Controller);
++            DetailedObject("BotPawn", Pawn);
++            if (!IsOf(Controller, L"/Script/AIModule.AIController"))
++            { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-D AIController invalid/inadequate"); return; }
++            if (!IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena"))
++            { LOG_INFO(LogBots, "[BOT][FAIL] saved bot Pawn invalid/stale"); return; }
++            if (Reference(Controller, "Pawn") != Pawn || Reference(Pawn, "Controller") != Controller)
++            { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-E possession mismatch"); return; }
++            auto Component = Movement(Pawn);
++            auto PathComponent = PathFollowing(Controller);
++            auto Navigation = Reference(World, "NavigationSystem");
++            ComponentState("MovementComponent", Component);
++            ComponentState("PathFollowingComponent", PathComponent);
++            DetailedObject("NavigationSystem", Navigation);
++            if (!IsOf(Component, L"/Script/Engine.PawnMovementComponent"))
++            { LOG_INFO(LogBots, "[BOT][FAIL] movement component missing/inadequate; not forcing movement mode"); return; }
++            if (!IsOf(PathComponent, L"/Script/AIModule.PathFollowingComponent"))
++            { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-C path following component missing/inadequate"); return; }
++            if (!IsOf(Navigation, L"/Script/NavigationSystem.NavigationSystemV1"))
++            { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-F NavigationSystem missing/inadequate; no initialization workaround"); return; }
++            auto Human = MoveTarget(Driver);
++            DetailedObject("Target player Pawn", Human);
++            if (!Valid(Human)) { LOG_INFO(LogBots, "[BOT][FAIL] human client Pawn not found (requires non-bot PlayerState)"); return; }
++            FVector Location{}, Target{};
++            if (!Getter(Pawn, L"/Script/Engine.Actor.K2_GetActorLocation", Location)
++                || !Getter(Human, L"/Script/Engine.Actor.K2_GetActorLocation", Target) || !Finite(Location) || !Finite(Target))
++            { LOG_INFO(LogBots, "[BOT][FAIL] current/target location unavailable/non-finite"); return; }
++            constexpr float Radius = 400.f;
++            const double Separation = Distance(Location, Target);
++            LOG_INFO(LogBots, "[BOT] CurrentLocation=({},{},{}) TargetLocation=({},{},{}) Distance={} AcceptanceRadius={}",
++                Location.X, Location.Y, Location.Z, Target.X, Target.Y, Target.Z, Separation, Radius);
++            if (Separation <= Radius)
++            { LOG_INFO(LogBots, "[BOT] already within acceptance radius; no move needed (not failure)"); return; }
++            Stage = "BOT1 resolve native MoveToLocation signature";
++            auto Fn = FindObject<UFunction>(L"/Script/AIModule.AIController.MoveToLocation");
++            ReflectedCall Call;
++            UObject* FilterClass = nullptr; // Native default navigation filter, no custom asset.
++            if (!Call.Init(Fn, {"Dest", "AcceptanceRadius", "bStopOnOverlap", "bUsePathfinding",
++                "bProjectDestinationToNavigation", "bCanStrafe", "FilterClass", "bAllowPartialPath", "ReturnValue"}, true)
++                || !Call.Put("Dest", Target) || !Call.Put("AcceptanceRadius", Radius)
++                || !Call.Put("bStopOnOverlap", false) || !Call.Put("bUsePathfinding", true)
++                || !Call.Put("bProjectDestinationToNavigation", true) || !Call.Put("bCanStrafe", false)
++                || !Call.Put("FilterClass", FilterClass) || !Call.Put("bAllowPartialPath", false)
++                || !Call.Put("ReturnValue", uint8_t{255}))
++            { LOG_INFO(LogBots, "[BOT][FAIL] MoveToLocation reflected signature unavailable/incompatible; no alternate call"); return; }
++            auto ResultEnum = FindObject<UEnum>(L"/Script/AIModule.EPathFollowingRequestResult");
++            if (!Valid(ResultEnum)) { LOG_INFO(LogBots, "[BOT][FAIL] move result enum unavailable"); return; }
++            const auto Failed = ResultEnum->GetValue("Failed");
++            const auto AtGoal = ResultEnum->GetValue("AlreadyAtGoal");
++            const auto Accepted = ResultEnum->GetValue("RequestSuccessful");
++            if (Failed < 0 || AtGoal < 0 || Accepted < 0 || Failed > 255 || AtGoal > 255 || Accepted > 255
++                || Failed == AtGoal || AtGoal == Accepted || Failed == Accepted)
++            { LOG_INFO(LogBots, "[BOT][FAIL] move result enum incompatible"); return; }
++            Stage = "BOT1 native AIController.MoveToLocation";
++            LOG_INFO(LogBots, "[BOT] Move request submitted function={} use_pathfinding=true project_to_nav=true stop_on_overlap=false can_strafe=false allow_partial=false FilterClass=null", Fn->GetFullName());
++            Call.Invoke(Controller); // Exactly one request for this explicit click, no follow loop.
++            uint8_t Result = 255;
++            Call.Return(Result);
++            const char* Name = Result == Failed ? "Failed" : Result == AtGoal ? "AlreadyAtGoal" : Result == Accepted ? "RequestSuccessful" : "Unknown";
++            LOG_INFO(LogBots, "[BOT] Move result={} name={}", Result, Name);
++            if (Result == Failed) { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-C native request failed immediately; no retry"); }
++            if (Result == Accepted)
++            {
++                Observation = {true, GetTickCount64(), 1, Location, Target};
++                SampleMove(Pawn, Controller, 0);
++            }
++        }
++
++        void ProcessDebugBody(UNetDriver* Driver)
++        {
++            if (!StaticFindObjectOriginal || !Valid(Driver)) return;
++            auto World = Reference(Driver, "World");
++            if (!Valid(World) || Reference(World, "NetDriver") != Driver) return;
++            auto Action = PendingDebug.exchange(DebugAction::None);
++            if (Action == DebugAction::None && !Observation.Active) return;
++            Stage = "BOT1 validate saved world";
++            ContextWorld = World;
++            ContextMode = Reference(World, "AuthorityGameMode");
++            ContextState = Reference(World, "GameState");
++            ContextManager = Resolve(LastBot.Manager);
++            if (Resolve(LastBot.World) != World || Resolve(LastBot.GameState) != ContextState)
++            {
++                LOG_INFO(LogBots, "[BOT][FAIL] no saved bot in current world, or world/GameState changed; references discarded");
++                LastBot = {};
++                Observation.Active = false;
++                return;
++            }
++            if (Action == DebugAction::Dump) DumpState(World);
++            if (Action == DebugAction::Move)
++            {
++                Observation.Active = false;
++                EAthenaGamePhase Phase = EAthenaGamePhase::None;
++                if (Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001 || !Globals::bStartedListening
++                    || World->GetName() != "Apollo_Terrain" || !IsOf(ContextMode, L"/Script/FortniteGame.FortGameModeAthena")
++                    || !IsOf(ContextState, L"/Script/FortniteGame.FortGameStateAthena")
++                    || !Read(ContextState, "GamePhase", Phase) || Phase != EAthenaGamePhase::SafeZones)
++                { LOG_INFO(LogBots, "[BOT][FAIL] Move requires listening 13.40 Apollo Athena SafeZones; phase={}", static_cast<int>(Phase)); return; }
++                MoveToPlayer(Driver, World);
++            }
++            if (Observation.Active)
++            {
++                auto Pawn = Resolve(LastBot.Pawn);
++                auto Controller = Resolve(LastBot.Controller);
++                if (!Valid(Pawn) || !Valid(Controller) || Reference(Controller, "Pawn") != Pawn || Reference(Pawn, "Controller") != Controller)
++                { LOG_INFO(LogBots, "[BOT][FAIL] observation stopped: bot invalid or possession changed"); Observation.Active = false; return; }
++                const ULONGLONG Elapsed = GetTickCount64() - Observation.Started;
++                if (Elapsed > 5500)
++                {
++                    LOG_INFO(LogBots, "[BOT] observation window expired before next tick; no late sample/follow/retry");
++                    Observation.Active = false;
++                    return;
++                }
++                if (Elapsed >= Observation.NextSecond * 1000)
++                {
++                    SampleMove(Pawn, Controller, Elapsed);
++                    Observation.NextSecond = static_cast<unsigned>(Elapsed / 1000) + 1;
++                }
++                if (Elapsed >= 5000)
++                { LOG_INFO(LogBots, "[BOT] observation ended (5-second window); no follow/retry"); Observation.Active = false; }
++            }
++        }
++
+         void LogAddress(const char* Label, void* Address)
+         {
+             HMODULE Module = nullptr;
+@@ -265,6 +645,22 @@ namespace Bot0
+         }
+     }
+ 
++    void QueueDebug(DebugAction Action, const char* Label)
++    {
++        auto Expected = DebugAction::None;
++        if (PendingDebug.compare_exchange_strong(Expected, Action))
++        {
++            LOG_INFO(LogBots, "[BOT] {} requested ui_thread={}", Label, GetCurrentThreadId());
++        }
++        else
++        {
++            LOG_INFO(LogBots, "[BOT][FAIL] debug request already queued; click again after it completes");
++        }
++    }
++
++    void RequestDump() { QueueDebug(DebugAction::Dump, "Dump Bot State"); }
++    void RequestMove() { QueueDebug(DebugAction::Move, "Move Bot To Player"); }
++
+     const char* Status()
+     {
+         switch (CurrentState.load())
+@@ -279,9 +675,13 @@ namespace Bot0
+ 
+     void ProcessPending(UNetDriver* NetDriver)
+     {
+-        if (CurrentState.load() != State::Queued) return;
++        if (CurrentState.load() != State::Queued && PendingDebug.load() == DebugAction::None && !Observation.Active) return;
+         // Kept separate from functions with C++ locals for MSVC SEH compatibility.
+-        __try { ProcessBody(NetDriver); }
++        __try
++        {
++            if (CurrentState.load() == State::Queued) ProcessBody(NetDriver);
++            ProcessDebugBody(NetDriver);
++        }
+         __except (RecordException(GetExceptionInformation())) {}
+     }
+ }
+diff --git a/Project Reboot 3.0/Bot0.h b/Project Reboot 3.0/Bot0.h
+index f2b5c0b..31f6f3b 100644
+--- a/Project Reboot 3.0/Bot0.h	
++++ b/Project Reboot 3.0/Bot0.h	
+@@ -5,6 +5,8 @@ class UNetDriver;
+ namespace Bot0
+ {
+     void RequestSpawn();
++    void RequestDump();
++    void RequestMove();
+     const char* Status();
+     void ProcessPending(UNetDriver* NetDriver);
+ }
+diff --git a/Project Reboot 3.0/gui.h b/Project Reboot 3.0/gui.h
+index f95a57a..f3d87d9 100644
+--- a/Project Reboot 3.0/gui.h	
++++ b/Project Reboot 3.0/gui.h	
+@@ -727,6 +727,10 @@ static inline void MainUI()
+ 				ImGui::TextUnformatted("Bots");
+ 				if (ImGui::Button("Spawn 1 Bot"))
+ 					Bot0::RequestSpawn();
++				if (ImGui::Button("Dump Bot State"))
++					Bot0::RequestDump();
++				if (ImGui::Button("Move Bot To Player"))
++					Bot0::RequestMove();
+ 				ImGui::TextWrapped("%s", Bot0::Status());
+ 				ImGui::Separator();
+ 

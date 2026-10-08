@@ -1,0 +1,594 @@
+diff --git a/Project Reboot 3.0/Bot0.cpp b/Project Reboot 3.0/Bot0.cpp
+index 301b261..a7f9db5 100644
+--- a/Project Reboot 3.0/Bot0.cpp	
++++ b/Project Reboot 3.0/Bot0.cpp	
+@@ -31,7 +31,7 @@ namespace Bot0
+         UObject* ContextState = nullptr;
+         UObject* ContextManager = nullptr;
+ 
+-        enum class DebugAction { None, Dump, Move };
++        enum class DebugAction { None, Dump, Move, NavDump, NavProjection, NavPath };
+         std::atomic<DebugAction> PendingDebug{DebugAction::None};
+ 
+         struct DebugReference
+@@ -346,6 +346,15 @@ namespace Bot0
+             }
+ 
+             void Invoke(UObject* Object) { Object->ProcessEvent(Function, Bytes.data()); }
++
++            template<typename T>
++            bool Get(const char* Member, T& Value)
++            {
++                const int Offset = Function->GetOffsetFunc(Member, false);
++                if (Offset < 0 || Offset + sizeof(T) > Bytes.size()) return false;
++                std::memcpy(&Value, Bytes.data() + Offset, sizeof(T));
++                return true;
++            }
+         };
+ 
+         template<typename T>
+@@ -461,6 +470,8 @@ namespace Bot0
+             return std::sqrt(X * X + Y * Y + Z * Z);
+         }
+ 
++#include "Bot2Nav.inl"
++
+         void SampleMove(UObject* Pawn, UObject* Controller, ULONGLONG Elapsed)
+         {
+             Stage = "BOT1 bounded movement observation";
+@@ -536,11 +547,14 @@ namespace Bot0
+             { LOG_INFO(LogBots, "[BOT][FAIL] move result enum incompatible"); return; }
+             Stage = "BOT1 native AIController.MoveToLocation";
+             LOG_INFO(LogBots, "[BOT] Move request submitted function={} use_pathfinding=true project_to_nav=true stop_on_overlap=false can_strafe=false allow_partial=false FilterClass=null", Fn->GetFullName());
++            NavPathFollowing("before MoveToLocation", Controller, Pawn);
++            Stage = "BOT1 native AIController.MoveToLocation";
+             Call.Invoke(Controller); // Exactly one request for this explicit click, no follow loop.
+             uint8_t Result = 255;
+             Call.Return(Result);
+             const char* Name = Result == Failed ? "Failed" : Result == AtGoal ? "AlreadyAtGoal" : Result == Accepted ? "RequestSuccessful" : "Unknown";
+             LOG_INFO(LogBots, "[BOT] Move result={} name={}", Result, Name);
++            NavPathFollowing("after MoveToLocation", Controller, Pawn);
+             if (Result == Failed) { LOG_INFO(LogBots, "[BOT][FAIL] BOT1-C native request failed immediately; no retry"); }
+             if (Result == Accepted)
+             {
+@@ -561,6 +575,11 @@ namespace Bot0
+             ContextMode = Reference(World, "AuthorityGameMode");
+             ContextState = Reference(World, "GameState");
+             ContextManager = Resolve(LastBot.Manager);
++            if (Action == DebugAction::NavDump || Action == DebugAction::NavProjection || Action == DebugAction::NavPath)
++            {
++                NavDiagnostic(Action, Driver, World);
++                return; // Explicit diagnostic operation only; no move/observation dispatch here.
++            }
+             if (Resolve(LastBot.World) != World || Resolve(LastBot.GameState) != ContextState)
+             {
+                 LOG_INFO(LogBots, "[BOT][FAIL] no saved bot in current world, or world/GameState changed; references discarded");
+@@ -620,6 +639,10 @@ namespace Bot0
+             LOG_INFO(LogBots, "[BOT][FAIL] exception=0x{:x} stage={} world=0x{:x} mode=0x{:x} state=0x{:x} manager=0x{:x}",
+                 Exception->ExceptionRecord->ExceptionCode, Stage, reinterpret_cast<uintptr_t>(ContextWorld),
+                 reinterpret_cast<uintptr_t>(ContextMode), reinterpret_cast<uintptr_t>(ContextState), reinterpret_cast<uintptr_t>(ContextManager));
++            if (std::strncmp(Stage, "BOT2", 4) == 0)
++            {
++                LOG_INFO(LogBots, "[NAV][FAIL] diagnostic exception=0x{:x} stage={}; normal crash handler continues", Exception->ExceptionRecord->ExceptionCode, Stage);
++            }
+             LogAddress("fault", Exception->ExceptionRecord->ExceptionAddress);
+             LOG_INFO(LogBots, "[BOT][FAIL] fault_context RIP=0x{:x} RSP=0x{:x}", Exception->ContextRecord->Rip, Exception->ContextRecord->Rsp);
+             void* Frames[16]{};
+@@ -661,6 +684,23 @@ namespace Bot0
+     void RequestDump() { QueueDebug(DebugAction::Dump, "Dump Bot State"); }
+     void RequestMove() { QueueDebug(DebugAction::Move, "Move Bot To Player"); }
+ 
++    void QueueNav(DebugAction Action, const char* Label)
++    {
++        auto Expected = DebugAction::None;
++        if (PendingDebug.compare_exchange_strong(Expected, Action))
++        {
++            LOG_INFO(LogBots, "[NAV] {} requested ui_thread={}", Label, GetCurrentThreadId());
++        }
++        else
++        {
++            LOG_INFO(LogBots, "[NAV][FAIL] diagnostic request already queued; no automatic retry");
++        }
++    }
++
++    void RequestNavDump() { QueueNav(DebugAction::NavDump, "Dump Nav State"); }
++    void RequestNavProjection() { QueueNav(DebugAction::NavProjection, "Test Nav Projection"); }
++    void RequestNavPath() { QueueNav(DebugAction::NavPath, "Test Path To Player"); }
++
+     const char* Status()
+     {
+         switch (CurrentState.load())
+diff --git a/Project Reboot 3.0/Bot0.h b/Project Reboot 3.0/Bot0.h
+index 31f6f3b..a8d8d13 100644
+--- a/Project Reboot 3.0/Bot0.h	
++++ b/Project Reboot 3.0/Bot0.h	
+@@ -7,6 +7,9 @@ namespace Bot0
+     void RequestSpawn();
+     void RequestDump();
+     void RequestMove();
++    void RequestNavDump();
++    void RequestNavProjection();
++    void RequestNavPath();
+     const char* Status();
+     void ProcessPending(UNetDriver* NetDriver);
+ }
+diff --git a/Project Reboot 3.0/Bot2Nav.inl b/Project Reboot 3.0/Bot2Nav.inl
+new file mode 100644
+index 0000000..aa25074
+--- /dev/null
++++ b/Project Reboot 3.0/Bot2Nav.inl	
+@@ -0,0 +1,445 @@
++// Included inside Bot0's existing server-context namespace. No new hooks/timers.
++// Reuses BOT-0/1 lifetime guards, reflected calls, saved bot and human selector.
++
++void NavObject(const char* Label, UObject* Object)
++{
++    LOG_INFO(LogBots, "[NAV] {}=0x{:x} valid={} name={} class={}", Label, reinterpret_cast<uintptr_t>(Object),
++        Valid(Object), Valid(Object) ? Object->GetName() : "null/invalid",
++        Valid(Object) && Valid(Object->ClassPrivate) ? Object->ClassPrivate->GetFullName() : "unavailable");
++}
++
++struct NavStructView
++{
++    const uint8_t* Data = nullptr;
++    UStruct* Type = nullptr;
++    int Size = 0;
++};
++
++void* NavMember(UStruct* Type, const char* Name)
++{
++    for (int Depth = 0; Depth < 8 && Valid(Type); ++Depth, Type = Type->GetSuperStruct())
++        if (auto Field = Type->GetPropertyFunc(Name, false)) return Field;
++    return nullptr;
++}
++
++int NavOffset(UStruct* Type, const char* Name)
++{
++    auto Field = NavMember(Type, Name);
++    if (!Field || IsBadReadPtr(Field, static_cast<int>(Offsets::Offset_Internal + sizeof(int)))) return -1;
++    return *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(Field) + Offsets::Offset_Internal);
++}
++
++NavStructView NavStruct(UObject* Object, const char* Member, const wchar_t* TypePath)
++{
++    auto Type = FindObject<UStruct>(TypePath);
++    if (!Valid(Object) || !IsOf(Type, L"/Script/CoreUObject.ScriptStruct")) return {};
++    const int Offset = Object->GetOffset(Member, false), Size = Type->GetPropertiesSize();
++    if (Offset < 0 || Size <= 0 || Size > 4096) return {};
++    auto Data = reinterpret_cast<uint8_t*>(Object) + Offset;
++    return IsBadReadPtr(Data, Size) ? NavStructView{} : NavStructView{Data, Type, Size};
++}
++
++template<typename T>
++bool NavRead(const NavStructView& View, const char* Member, T& Value)
++{
++    if (!View.Data || !Valid(View.Type)) return false;
++    const int Offset = NavOffset(View.Type, Member);
++    if (Offset < 0 || Offset + sizeof(T) > View.Size || IsBadReadPtr(View.Data + Offset, sizeof(T))) return false;
++    std::memcpy(&Value, View.Data + Offset, sizeof(T));
++    return true;
++}
++
++bool NavBit(const NavStructView& View, const char* Member, bool& Value)
++{
++    const int Offset = View.Data ? NavOffset(View.Type, Member) : -1;
++    auto Field = View.Data ? NavMember(View.Type, Member) : nullptr;
++    if (Offset < 0 || Offset >= View.Size || !Field || IsBadReadPtr(View.Data + Offset, 1)) return false;
++    const uint8_t Mask = GetFieldMask(Field); // Existing version-aware bool metadata helper.
++    if (!Mask) return false;
++    const uint8_t Byte = View.Data[Offset];
++    Value = Mask == 0xff ? Byte != 0 : (Byte & Mask) != 0;
++    return true;
++}
++
++void NavAgent(const char* Label, const NavStructView& View)
++{
++    LOG_INFO(LogBots, "[NAV] {} reflected_struct_available={} size={}", Label, View.Data != nullptr, View.Size);
++    if (!View.Data) return;
++    for (const char* Name : {"AgentRadius", "AgentHeight", "AgentStepHeight", "NavWalkingSearchHeightScale"})
++    {
++        float Value = 0;
++        const bool Found = NavRead(View, Name, Value) && std::isfinite(Value);
++        LOG_INFO(LogBots, "[NAV] {}.{} available={} value={}", Label, Name, Found, Value);
++    }
++    for (const char* Name : {"bCanCrouch", "bCanJump", "bCanWalk", "bCanSwim", "bCanFly"})
++    {
++        bool Value = false;
++        const bool Found = NavBit(View, Name, Value);
++        LOG_INFO(LogBots, "[NAV] {}.{} available={} value={}", Label, Name, Found, Value);
++    }
++    const int Preferred = NavOffset(View.Type, "PreferredNavData");
++    auto SoftType = FindObject<UStruct>(L"/Script/CoreUObject.SoftClassPath");
++    FName Asset;
++    bool HasAsset = false;
++    if (Preferred >= 0 && IsOf(SoftType, L"/Script/CoreUObject.ScriptStruct"))
++    {
++        const int Size = SoftType->GetPropertiesSize();
++        if (Size > 0 && Preferred + Size <= View.Size)
++            HasAsset = NavRead(NavStructView{View.Data + Preferred, SoftType, Size}, "AssetPathName", Asset);
++    }
++    LOG_INFO(LogBots, "[NAV] {}.PreferredNavData property_present={} asset_path_available={} asset={} (no asset load)",
++        Label, Preferred >= 0, HasAsset, HasAsset ? Asset.ToString() : "opaque/unavailable");
++    FName Name;
++    if (NavRead(View, "Name", Name))
++    {
++        LOG_INFO(LogBots, "[NAV] {}.Name={}", Label, Name.ToString());
++    }
++    FVector Extent;
++    if (NavRead(View, "DefaultQueryExtent", Extent) && Finite(Extent))
++    {
++        LOG_INFO(LogBots, "[NAV] {}.DefaultQueryExtent=({},{},{})", Label, Extent.X, Extent.Y, Extent.Z);
++    }
++}
++
++template<typename T>
++bool NavArray(UObject* Object, const char* Member, TArray<T>& Value, int Limit)
++{
++    if (!Read(Object, Member, Value) || Value.ArrayNum < 0 || Value.ArrayNum > Limit || Value.ArrayNum > Value.ArrayMax) return false;
++    return Value.ArrayNum == 0 || (Value.Data && !IsBadReadPtr(Value.Data, sizeof(T) * Value.ArrayNum));
++}
++
++UObject* NavStaticReceiver(UFunction* Function, const wchar_t* DefaultPath)
++{
++    auto Receiver = FindObject(DefaultPath); // Existing CDO only; never create/initialize one.
++    return Valid(Function) && Valid(Receiver) && IsOf(Function->OuterPrivate, L"/Script/CoreUObject.Class")
++        && Receiver->IsA(reinterpret_cast<UClass*>(Function->OuterPrivate)) ? Receiver : nullptr;
++}
++
++UObject* NavCurrentPath(UObject* Controller, bool& Available)
++{
++    Available = false;
++    if (!IsOf(Controller, L"/Script/AIModule.AIController")) return nullptr;
++    auto Function = FindObject<UFunction>(L"/Script/AIModule.AIBlueprintHelperLibrary.GetCurrentPath");
++    auto Receiver = NavStaticReceiver(Function, L"/Script/AIModule.Default__AIBlueprintHelperLibrary");
++    ReflectedCall Call;
++    UObject* Result = nullptr;
++    if (!Receiver || !Call.Init(Function, {"Controller", "ReturnValue"})
++        || !Call.Put("Controller", Controller) || !Call.Put("ReturnValue", Result)) return nullptr;
++    Call.Invoke(Receiver); // Returns a transient COPY, not the controller's shared native path.
++    Available = Call.Return(Result);
++    return Result;
++}
++
++void NavPathSummary(const char* Label, UObject* Path, bool ListPoints)
++{
++    NavObject(Label, Path);
++    if (!IsOf(Path, L"/Script/NavigationSystem.NavigationPath"))
++    {
++        LOG_INFO(LogBots, "[NAV] {} path result=Fail/Unavailable (null or incompatible wrapper)", Label);
++        return;
++    }
++    bool ValidPath = false, Partial = false;
++    const bool HasValid = Getter(Path, L"/Script/NavigationSystem.NavigationPath.IsValid", ValidPath);
++    const bool HasPartial = Getter(Path, L"/Script/NavigationSystem.NavigationPath.IsPartial", Partial);
++    TArray<FVector> Points{};
++    const bool HasPoints = NavArray(Path, "PathPoints", Points, 10000);
++    LOG_INFO(LogBots, "[NAV] {} path result={} valid_available={} valid={} partial_available={} partial={} path_points_available={} path_points={}",
++        Label, !HasValid || !HasPartial ? "Unknown" : !ValidPath ? "Fail" : Partial ? "Partial" : "Success",
++        HasValid, ValidPath, HasPartial, Partial, HasPoints, HasPoints ? Points.ArrayNum : -1);
++    if (HasPoints && ListPoints)
++        for (int i = 0; i < Points.ArrayNum && i < 10; ++i)
++        {
++            const auto& P = Points.at(i);
++            LOG_INFO(LogBots, "[NAV] {} path_point[{}]=({},{},{})", Label, i, P.X, P.Y, P.Z);
++        }
++}
++
++void NavPathFollowing(const char* Label, UObject* Controller, UObject* Pawn)
++{
++    Stage = "BOT2 PathFollowing read-only snapshot";
++    LOG_INFO(LogBots, "[NAV] PATHFOLLOWING SNAPSHOT label={}", Label);
++    auto MovementComponent = Movement(Pawn);
++    auto Following = PathFollowing(Controller);
++    NavObject("MovementComponent", MovementComponent);
++    NavObject("PathFollowing", Following);
++    UObject* Owner = nullptr;
++    const bool HasOwner = Getter(Following, L"/Script/Engine.ActorComponent.GetOwner", Owner);
++    UObject* PawnOwner = nullptr;
++    const bool HasPawnOwner = Getter(MovementComponent, L"/Script/Engine.PawnMovementComponent.GetPawnOwner", PawnOwner);
++    LOG_INFO(LogBots, "[NAV] PathFollowing owner_available={} owner_matches_controller={} Movement pawn_owner_available={} pawn_owner_matches_bot={}",
++        HasOwner, HasOwner && Owner == Controller, HasPawnOwner, HasPawnOwner && PawnOwner == Pawn);
++    // This property may be native-only or have a storage kind the SDK cannot prove.
++    // Do NOT reinterpret a weak/interface/shared pointer as an object pointer.
++    for (const char* Name : {"MovementComp", "NavMovement", "PathFollowingAgent", "MovementComponent", "CurrentRequestId", "RequestID", "Path"})
++    {
++        LOG_INFO(LogBots, "[NAV] PathFollowing.{} property_present={} storage/content=unverified; not dereferenced", Name,
++            Valid(Following) && Following->GetProperty(Name, false) != nullptr);
++    }
++    LOG_INFO(LogBots, "[NAV] PathFollowing.MovementComp==BotMovementComponent association=UNKNOWN (no validated reflected getter/storage); request_id=UNKNOWN");
++    uint8_t Status = 255, Action = 255;
++    const bool HasStatus = Getter(Controller, L"/Script/AIModule.AIController.GetMoveStatus", Status);
++    const bool HasAction = Getter(Following, L"/Script/AIModule.PathFollowingComponent.GetPathActionType", Action);
++    FVector Destination;
++    const bool HasDestination = Getter(Following, L"/Script/AIModule.PathFollowingComponent.GetPathDestination", Destination);
++    LOG_INFO(LogBots, "[NAV] status_available={} status={} name={} action_available={} action={} destination_available={} destination=({},{},{})",
++        HasStatus, Status, HasStatus ? MoveStatusName(Status) : "unavailable", HasAction, Action,
++        HasDestination, Destination.X, Destination.Y, Destination.Z);
++    bool HasPath = false;
++    auto CurrentPath = NavCurrentPath(Controller, HasPath);
++    LOG_INFO(LogBots, "[NAV] current_path_api_available={} representation=UObject copy; native request creation stage not directly observable", HasPath);
++    NavPathSummary("CurrentPathCopy", CurrentPath, false);
++}
++
++void NavActors(UObject* World, const wchar_t* ClassPath, const char* Label)
++{
++    auto ActorClass = FindObject<UClass>(ClassPath);
++    auto Function = FindObject<UFunction>(L"/Script/Engine.GameplayStatics.GetAllActorsOfClass");
++    auto Receiver = NavStaticReceiver(Function, L"/Script/Engine.Default__GameplayStatics");
++    ReflectedCall Call;
++    TArray<UObject*> Actors{};
++    if (!Valid(ActorClass) || !Receiver || !FMemory::Realloc
++        || !Call.Init(Function, {"WorldContextObject", "ActorClass", "OutActors"})
++        || !Call.Put("WorldContextObject", World) || !Call.Put("ActorClass", ActorClass) || !Call.Put("OutActors", Actors))
++    {
++        LOG_INFO(LogBots, "[NAV] {} world_actor_query=unavailable", Label);
++        return;
++    }
++    Call.Invoke(Receiver);
++    if (!Call.Get("OutActors", Actors)) return;
++    const bool Header = Actors.ArrayNum >= 0 && Actors.ArrayNum <= 10000 && Actors.ArrayNum <= Actors.ArrayMax;
++    const bool Safe = Header && (Actors.ArrayNum == 0 || (Actors.Data && !IsBadReadPtr(Actors.Data, sizeof(UObject*) * Actors.ArrayNum)));
++    LOG_INFO(LogBots, "[NAV] {} world_actor_query_safe={} count={} (world actors alone do not prove NavData registration)",
++        Label, Safe, Safe ? Actors.ArrayNum : -1);
++    if (Safe)
++        for (int i = 0; i < Actors.ArrayNum && i < 10; ++i)
++        {
++            NavObject(Label, Actors.at(i));
++            FVector Location;
++            if (Getter(Actors.at(i), L"/Script/Engine.Actor.K2_GetActorLocation", Location))
++            {
++                LOG_INFO(LogBots, "[NAV] {}[{}] location=({},{},{}) bounds_extent/tiles=not queried", Label, i, Location.X, Location.Y, Location.Z);
++            }
++        }
++    // This OutActors is owned by the query, unlike borrowed NavDataSet/PathPoints.
++    if (Header && Actors.Data) FMemory::Free(Actors.Data);
++}
++
++UObject* NavDefaultData(UObject* Navigation)
++{
++    auto Data = Reference(Navigation, "MainNavData");
++    if (!IsOf(Data, L"/Script/NavigationSystem.NavigationData")) Data = Reference(Navigation, "DefaultNavData");
++    return IsOf(Data, L"/Script/NavigationSystem.NavigationData") ? Data : nullptr;
++}
++
++bool NavWorldBool(UObject* World, const wchar_t* FunctionPath, bool& Result)
++{
++    auto Function = FindObject<UFunction>(FunctionPath);
++    auto Receiver = NavStaticReceiver(Function, L"/Script/NavigationSystem.Default__NavigationSystemV1");
++    ReflectedCall Call;
++    if (!Receiver || !Call.Init(Function, {"WorldContextObject", "ReturnValue"})
++        || !Call.Put("WorldContextObject", World) || !Call.Put("ReturnValue", false)) return false;
++    Call.Invoke(Receiver);
++    return Call.Return(Result);
++}
++
++void NavDescribeFunction(const wchar_t* Path, const char* Label)
++{
++    auto Function = FindObject<UFunction>(Path);
++    if (!IsOf(Function, L"/Script/CoreUObject.Function"))
++    { LOG_INFO(LogBots, "[NAV] candidate {} function unavailable; not called", Label); return; }
++    LOG_INFO(LogBots, "[NAV] candidate {} function={} buffer_size={} metadata only; not called", Label, Function->GetFullName(), Function->GetPropertiesSize());
++    auto Field = Function->Get<void*>(static_cast<int>(Offsets::Children));
++    for (int i = 0; Field && i < 12; ++i, Field = GetNext(Field))
++    {
++        if (IsBadReadPtr(Field, static_cast<int>(Offsets::Offset_Internal + sizeof(int))))
++        { LOG_INFO(LogBots, "[NAV] candidate {} metadata unreadable; stopped", Label); return; }
++        const auto Name = GetFNameOfProp(Field)->ToString();
++        LOG_INFO(LogBots, "[NAV] candidate {} field={} offset={} storage_type=unvalidated", Label, Name, Function->GetOffsetFunc(Name, false));
++    }
++}
++
++void NavDump(UObject* World, UObject* Navigation, UObject* Controller, UObject* Pawn)
++{
++    Stage = "BOT2 Dump Nav State";
++    LOG_INFO(LogBots, "[NAV] ============================== NAV STATE");
++    NavObject("World", World);
++    NavObject("NavigationSystem", Navigation);
++    NavObject("BotController", Controller);
++    NavObject("BotPawn", Pawn);
++    NavObject("BrainComponent", Reference(Controller, "BrainComponent"));
++    NavPathFollowing("Dump Nav State", Controller, Pawn);
++    Stage = "BOT2 NavData/agent inventory";
++    NavObject("MainNavData", Reference(Navigation, "MainNavData"));
++    NavObject("DefaultNavData", Reference(Navigation, "DefaultNavData"));
++    LOG_INFO(LogBots, "[NAV] GetNavDataForProps/GetNavDataForActor/GetMainNavData/GetDefaultNavDataInstance=not exposed as UFunction in audited 13.40 dump; no address/virtual call guessed");
++    NavAgent("Bot.NavAgentProps", NavStruct(Movement(Pawn), "NavAgentProps", L"/Script/Engine.NavAgentProperties"));
++    TArray<UObject*> Set{};
++    const bool HasSet = NavArray(Navigation, "NavDataSet", Set, 1000);
++    LOG_INFO(LogBots, "[NAV] NavDataSet available={} count={}", HasSet, HasSet ? Set.ArrayNum : -1);
++    if (HasSet)
++        for (int i = 0; i < Set.ArrayNum && i < 20; ++i)
++        {
++            NavObject("NavDataSet entry", Set.at(i));
++            LOG_INFO(LogBots, "[NAV] NavDataSet[{}] registration_evidence=membership; active/tiles/internal_registration=UNKNOWN", i);
++            if (IsOf(Set.at(i), L"/Script/NavigationSystem.NavigationData"))
++                NavAgent("NavData.Config", NavStruct(Set.at(i), "Config", L"/Script/Engine.NavDataConfig"));
++        }
++    auto ConfigType = FindObject<UStruct>(L"/Script/Engine.NavDataConfig");
++    TArray<uint8_t> Agents{}; // Borrowed array header only; stride is reflected, never sizeof guessed struct.
++    const bool HasAgents = Read(Navigation, "SupportedAgents", Agents) && Agents.ArrayNum >= 0 && Agents.ArrayNum <= 64
++        && Agents.ArrayNum <= Agents.ArrayMax && IsOf(ConfigType, L"/Script/CoreUObject.ScriptStruct");
++    const int Stride = HasAgents ? ConfigType->GetPropertiesSize() : 0;
++    const bool SafeAgents = HasAgents && Stride > 0 && Stride <= 4096
++        && (Agents.ArrayNum == 0 || (Agents.Data && !IsBadReadPtr(Agents.Data, Stride * Agents.ArrayNum)));
++    LOG_INFO(LogBots, "[NAV] SupportedAgents available={} count={} stride={} matching/native_agent_index=UNKNOWN", SafeAgents, SafeAgents ? Agents.ArrayNum : -1, Stride);
++    if (SafeAgents)
++        for (int i = 0; i < Agents.ArrayNum && i < 16; ++i)
++        {
++            LOG_INFO(LogBots, "[NAV] SupportedAgents index={}", i);
++            NavAgent("SupportedAgent", NavStructView{Agents.Data + Stride * i, ConfigType, Stride});
++        }
++    FName DefaultName;
++    const bool HasName = Read(Navigation, "DefaultAgentName", DefaultName);
++    LOG_INFO(LogBots, "[NAV] DefaultAgentName available={} name={}", HasName, HasName ? DefaultName.ToString() : "unavailable");
++    bool Building = false, Locked = false;
++    const bool HasBuilding = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuilt", Building);
++    const bool HasLocked = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuiltOrLocked", Locked);
++    LOG_INFO(LogBots, "[NAV] building_available={} building={} building_or_locked_available={} building_or_locked={}", HasBuilding, Building, HasLocked, Locked);
++    bool InitialLock = false;
++    const bool HasInitialLock = Getter(Navigation, L"/Script/FortniteGame.AthenaNavSystem.IsInitialNavigationLockActive", InitialLock);
++    LOG_INFO(LogBots, "[NAV] AthenaNavSystem initial_navigation_lock_available={} initial_navigation_lock_active={} (no unlock)", HasInitialLock, InitialLock);
++    NavDescribeFunction(L"/Script/FortniteGame.FortNavSystem.IsNavmeshInRadiusInitialized", "FortNavSystem.IsNavmeshInRadiusInitialized");
++    NavActors(World, L"/Script/NavigationSystem.NavigationData", "NavigationData actor");
++    NavActors(World, L"/Script/NavigationSystem.NavMeshBoundsVolume", "NavMeshBoundsVolume actor");
++    LOG_INFO(LogBots, "[NAV] ============================== END NAV STATE");
++}
++
++FVector NavExtent(UObject* Data)
++{
++    FVector Extent;
++    const bool HasExtent = Read(Data, "DefaultQueryExtent", Extent)
++        || NavRead(NavStruct(Data, "Config", L"/Script/Engine.NavDataConfig"), "DefaultQueryExtent", Extent);
++    if (HasExtent && Finite(Extent) && Extent.X > 0 && Extent.Y > 0 && Extent.Z > 0
++        && Extent.X <= 500 && Extent.Y <= 500 && Extent.Z <= 1000)
++    {
++        LOG_INFO(LogBots, "[NAV] QueryExtent=({},{},{}) source=reflected NavData DefaultQueryExtent/Config (bounded)", Extent.X, Extent.Y, Extent.Z);
++        return Extent;
++    }
++    LOG_INFO(LogBots, "[NAV] QueryExtent=(50,50,250) source=UE4.27 NavDataConfig documented default; diagnostic fallback, not observed Fortnite config; one extent per point");
++    return FVector{50.f, 50.f, 250.f};
++}
++
++struct NavProjectionResult { bool Available = false; bool Success = false; FVector Location{}; };
++
++UObject* NavFilter(UObject* Controller)
++{
++    auto Filter = Reference(Controller, "DefaultNavigationFilterClass");
++    auto Base = FindObject<UClass>(L"/Script/NavigationSystem.NavigationQueryFilter");
++    if (!IsOf(Filter, L"/Script/CoreUObject.Class") || !Valid(Base)
++        || !DerivesFrom(reinterpret_cast<UClass*>(Filter), Base)) Filter = nullptr;
++    NavObject("Controller.DefaultNavigationFilterClass (if reflected/valid)", Filter);
++    LOG_INFO(LogBots, "[NAV] filter_source={} (no custom filter created)", Filter ? "controller default class" : "native NavData default; controller default unavailable/null");
++    return Filter;
++}
++
++NavProjectionResult NavProject(UObject* World, UObject* Data, UObject* Filter, const FVector& Point, const FVector& Extent, const char* Label)
++{
++    Stage = "BOT2 native K2_ProjectPointToNavigation";
++    NavProjectionResult Result;
++    LOG_INFO(LogBots, "[NAV] {}Location=({},{},{})", Label, Point.X, Point.Y, Point.Z);
++    auto Function = FindObject<UFunction>(L"/Script/NavigationSystem.NavigationSystemV1.K2_ProjectPointToNavigation");
++    auto Receiver = NavStaticReceiver(Function, L"/Script/NavigationSystem.Default__NavigationSystemV1");
++    ReflectedCall Call;
++    if (!Receiver || !Call.Init(Function, {"WorldContextObject", "Point", "ProjectedLocation", "NavData", "FilterClass", "QueryExtent", "ReturnValue"})
++        || !Call.Put("WorldContextObject", World) || !Call.Put("Point", Point) || !Call.Put("ProjectedLocation", FVector{})
++        || !Call.Put("NavData", Data) || !Call.Put("FilterClass", Filter) || !Call.Put("QueryExtent", Extent) || !Call.Put("ReturnValue", false))
++    {
++        LOG_INFO(LogBots, "[NAV][FAIL] {}Projection API/signature unavailable; not classified as projection failure", Label);
++        return Result;
++    }
++    LOG_INFO(LogBots, "[NAV] {}Projection query submitted function={} NavData=0x{:x} selection=explicit-default-if-readable otherwise native default; bot-agent compatibility=not established",
++        Label, Function->GetFullName(), reinterpret_cast<uintptr_t>(Data));
++    Call.Invoke(Receiver);
++    Result.Available = Call.Return(Result.Success) && Call.Get("ProjectedLocation", Result.Location);
++    if (Result.Success && !Finite(Result.Location)) { Result.Available = false; Result.Success = false; }
++    LOG_INFO(LogBots, "[NAV] {}Projection available={} success={} projectedLocation=({},{},{})", Label,
++        Result.Available, Result.Success, Result.Location.X, Result.Location.Y, Result.Location.Z);
++    return Result;
++}
++
++void NavPathQuery(UObject* World, UObject* Navigation, UObject* Controller, const FVector& Start, const FVector& End, const char* StartSource)
++{
++    Stage = "BOT2 native FindPathToLocationSynchronously";
++    NavObject("DefaultNavData candidate (projection only)", NavDefaultData(Navigation));
++    NavObject("PathfindingContext BotController", Controller);
++    LOG_INFO(LogBots, "[NAV] Start=({},{},{}) End=({},{},{}) start_source={} end_source=human actor location (same target as MoveTo); projection is separate, no default-NavData coordinates forced onto bot agent; exact selected NavData=native-only/UNKNOWN", Start.X, Start.Y, Start.Z, End.X, End.Y, End.Z, StartSource);
++    auto Function = FindObject<UFunction>(L"/Script/NavigationSystem.NavigationSystemV1.FindPathToLocationSynchronously");
++    auto Receiver = NavStaticReceiver(Function, L"/Script/NavigationSystem.Default__NavigationSystemV1");
++    ReflectedCall Call;
++    UObject* Filter = NavFilter(Controller);
++    UObject* Result = nullptr;
++    if (!Receiver || !Call.Init(Function, {"WorldContextObject", "PathStart", "PathEnd", "PathfindingContext", "FilterClass", "ReturnValue"})
++        || !Call.Put("WorldContextObject", World) || !Call.Put("PathStart", Start) || !Call.Put("PathEnd", End)
++        || !Call.Put("PathfindingContext", Controller) || !Call.Put("FilterClass", Filter) || !Call.Put("ReturnValue", Result))
++    {
++        LOG_INFO(LogBots, "[NAV][FAIL] path API/signature unavailable; no path request submitted");
++        return;
++    }
++    LOG_INFO(LogBots, "[NAV] path request submitted function={} context=BotController native agent selection FilterClass=0x{:x}; one query, no MoveTo", Function->GetFullName(), reinterpret_cast<uintptr_t>(Filter));
++    Call.Invoke(Receiver);
++    Call.Return(Result);
++    NavPathSummary("TestPathToPlayer", Result, true);
++}
++
++void NavDiagnostic(DebugAction Action, UNetDriver* Driver, UObject* World)
++{
++    Stage = "BOT2 diagnostic preconditions";
++    LOG_INFO(LogBots, "[NAV] consuming diagnostic action={} tick_thread={}", static_cast<int>(Action), GetCurrentThreadId());
++    auto Controller = Resolve(LastBot.Controller);
++    auto Pawn = Resolve(LastBot.Pawn);
++    EAthenaGamePhase Phase = EAthenaGamePhase::None;
++    if (Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001 || !Globals::bStartedListening
++        || World->GetName() != "Apollo_Terrain" || Resolve(LastBot.World) != World || Resolve(LastBot.GameState) != ContextState
++        || !IsOf(ContextMode, L"/Script/FortniteGame.FortGameModeAthena") || !IsOf(ContextState, L"/Script/FortniteGame.FortGameStateAthena")
++        || !Read(ContextState, "GamePhase", Phase) || Phase != EAthenaGamePhase::SafeZones
++        || !IsOf(Controller, L"/Script/AIModule.AIController") || !IsOf(Pawn, L"/Script/FortniteGame.FortPlayerPawnAthena")
++        || Reference(Controller, "Pawn") != Pawn || Reference(Pawn, "Controller") != Controller)
++    {
++        LOG_INFO(LogBots, "[NAV][FAIL] requires saved/possessed bot in current listening 13.40/426 Apollo Athena SafeZones; phase={}; no query", static_cast<int>(Phase));
++        return;
++    }
++    auto Navigation = Reference(World, "NavigationSystem");
++    NavObject("NavigationSystem", Navigation);
++    if (Action == DebugAction::NavDump) { NavDump(World, Navigation, Controller, Pawn); return; }
++    if (!IsOf(Navigation, L"/Script/NavigationSystem.NavigationSystemV1"))
++    { LOG_INFO(LogBots, "[NAV][FAIL] NavigationSystem missing/inadequate; no creation"); return; }
++    auto Human = MoveTarget(Driver);
++    NavObject("TargetPlayerPawn", Human);
++    FVector Start, End;
++    if (!Valid(Human) || !Getter(Pawn, L"/Script/Engine.Actor.K2_GetActorLocation", Start)
++        || !Getter(Human, L"/Script/Engine.Actor.K2_GetActorLocation", End) || !Finite(Start) || !Finite(End))
++    { LOG_INFO(LogBots, "[NAV][FAIL] non-bot human/current target location unavailable; no query"); return; }
++    FVector AgentLocation;
++    const bool HasAgentLocation = Getter(Pawn, L"/Script/Engine.Pawn.GetNavAgentLocation", AgentLocation);
++    LOG_INFO(LogBots, "[NAV] BotNavAgentLocation available={} value=({},{},{}) actor_to_agent_distance={}; projection uses actor location, path uses valid agent location when available",
++        HasAgentLocation, AgentLocation.X, AgentLocation.Y, AgentLocation.Z, HasAgentLocation && Finite(AgentLocation) ? Distance(Start, AgentLocation) : -1.0);
++    if (Action == DebugAction::NavProjection)
++    {
++        auto Data = NavDefaultData(Navigation);
++        NavObject("Projection NavData (default candidate)", Data);
++        const FVector Extent = NavExtent(Data);
++        auto Filter = NavFilter(Controller);
++        const auto Bot = NavProject(World, Data, Filter, Start, Extent, "Bot");
++        const auto Player = NavProject(World, Data, Filter, End, Extent, "Player");
++        const char* Classification = !Bot.Available || !Player.Available ? "UNKNOWN (API unavailable)"
++            : !Bot.Success ? "NAV-A candidate" : !Player.Success ? "NAV-B candidate" : "both projections OK; path still untested for bot agent";
++        LOG_INFO(LogBots, "[NAV] projection summary={} scope=default NavData, not proof of bot-agent match; no move", Classification);
++    }
++    if (Action == DebugAction::NavPath)
++    {
++        const bool UseAgentLocation = HasAgentLocation && Finite(AgentLocation);
++        NavPathQuery(World, Navigation, Controller, UseAgentLocation ? AgentLocation : Start, End,
++            UseAgentLocation ? "Pawn.GetNavAgentLocation" : "actor location fallback (agent getter unavailable)");
++    }
++    LOG_INFO(LogBots, "[NAV] diagnostic completed; no setup/fix/move/retry");
++}
+diff --git a/Project Reboot 3.0/Project Reboot 3.0.vcxproj b/Project Reboot 3.0/Project Reboot 3.0.vcxproj
+index 98cd1f2..fa778a3 100644
+--- a/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
++++ b/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
+@@ -305,6 +305,7 @@
+     <ClInclude Include="BitArray.h" />
+     <ClInclude Include="botnames.h" />
+     <ClInclude Include="Bot0.h" />
++    <ClInclude Include="Bot2Nav.inl" />
+     <ClInclude Include="bots.h" />
+     <ClInclude Include="BP_IslandScripting.h" />
+     <ClInclude Include="BuildingActor.h" />
+diff --git a/Project Reboot 3.0/gui.h b/Project Reboot 3.0/gui.h
+index f3d87d9..ac1a648 100644
+--- a/Project Reboot 3.0/gui.h	
++++ b/Project Reboot 3.0/gui.h	
+@@ -731,6 +731,12 @@ static inline void MainUI()
+ 					Bot0::RequestDump();
+ 				if (ImGui::Button("Move Bot To Player"))
+ 					Bot0::RequestMove();
++				if (ImGui::Button("Dump Nav State"))
++					Bot0::RequestNavDump();
++				if (ImGui::Button("Test Nav Projection"))
++					Bot0::RequestNavProjection();
++				if (ImGui::Button("Test Path To Player"))
++					Bot0::RequestNavPath();
+ 				ImGui::TextWrapped("%s", Bot0::Status());
+ 				ImGui::Separator();
+ 

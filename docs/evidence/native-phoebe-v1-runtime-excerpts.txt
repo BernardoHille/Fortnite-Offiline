@@ -1,0 +1,31 @@
+Native Phoebe V1 — user test, 2026-10-08 10:46:38 America/Sao_Paulo.
+Selected technical events only; source line numbers from launcher.log retained.
+Full log, account/authentication data, raw dumps and binary artifacts remain local.
+Outcome: PHOEBE-V1 NAV-BLOCKED, zero native bots spawned.
+
+21959: [HOST] File to inject for gameServer at path File: 'D:\Games\Fortnite-Local-C2S3\reboot\artifacts\reboot3\native-phoebe-bootstrap-v1\Project Reboot 3.0.dll'
+29447: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bAllowAIGoalManager=true available=true owner=/Game/Athena/AI/AISettings/Phoebe_Default_AISettings.Phoebe_Default_AISettings offset=48 byte_offset=0 field_size=1 byte_mask=2 field_mask=2
+29448: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bAllowAIDirector=true available=true owner=/Game/Athena/AI/AISettings/Phoebe_Default_AISettings.Phoebe_Default_AISettings offset=48 byte_offset=0 field_size=1 byte_mask=1 field_mask=1
+29537: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] initial_lock available=true value=false route=exact WorldContextObject/ReturnValue getter on existing owner CDO; lock owner/reason bits UNKNOWN; no unlock
+29541: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bInitialBuildingLocked=true available=true owner=/Game/Athena/Apollo/Maps/Apollo_Terrain.Apollo_Terrain:AthenaNavSystem_2147480490 offset=104 byte_offset=0 field_size=1 byte_mask=64 field_mask=64
+29543: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bAutoCreateNavigationData=false available=true owner=/Game/Athena/Apollo/Maps/Apollo_Terrain.Apollo_Terrain:AthenaNavSystem_2147480490 offset=104 byte_offset=0 field_size=1 byte_mask=1 field_mask=1
+29547: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bUsesStreamedInNavLevel=true available=true owner=/Game/Athena/Apollo/Maps/Apollo_Terrain.Apollo_Terrain:AthenaNavSystem_2147480490 offset=5896 byte_offset=0 field_size=1 byte_mask=4 field_mask=4
+29548: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bAllowAutoRebuild=false available=true owner=/Game/Athena/Apollo/Maps/Apollo_Terrain.Apollo_Terrain:AthenaNavSystem_2147480490 offset=5896 byte_offset=0 field_size=1 byte_mask=1 field_mask=1
+29565: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] WorldSettings.NavigationSystemConfig valid=true path=/Game/Athena/Apollo/Maps/Apollo_Terrain.Apollo_Terrain:PersistentLevel.FortWorldSettings.NullNavSysConfig_0 class=Class /Script/Engine.NullNavSysConfig
+29585: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] WorldSettings.NavigationSystemConfigOverride valid=true path=/Game/Maps/Apollo_Nav_Gameplay.Apollo_Nav_Gameplay:PersistentLevel.AthenaNavSystemConfigOverride_1.AthenaNavSystemConfig_0 class=Class /Script/FortniteGame.AthenaNavSystemConfig
+29594: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bUsesStreamedInNavLevel=true available=true owner=/Game/Maps/Apollo_Nav_Gameplay.Apollo_Nav_Gameplay:PersistentLevel.AthenaNavSystemConfigOverride_1.AthenaNavSystemConfig_0 offset=88 byte_offset=0 field_size=1 byte_mask=4 field_mask=4
+29596: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] bAllowAutoRebuild=false available=true owner=/Game/Maps/Apollo_Nav_Gameplay.Apollo_Nav_Gameplay:PersistentLevel.AthenaNavSystemConfigOverride_1.AthenaNavSystemConfig_0 offset=88 byte_offset=0 field_size=1 byte_mask=1 field_mask=1
+29614: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] World.StreamingLevels available=true count=679; read-only sample_limit=64
+29616: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[0] package=/Game/Maps/Apollo_Nav_Gameplay loaded=true visible=true
+29617: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[1] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_0 loaded=false visible=false
+29618: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[2] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_1 loaded=false visible=false
+29620: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[3] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_2 loaded=false visible=false
+29622: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[4] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_3 loaded=false visible=false
+29623: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[5] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_4 loaded=false visible=false
+29624: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[6] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_5 loaded=false visible=false
+29626: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[7] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_6 loaded=false visible=false
+29627: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] streaming[8] package=/Game/Maps/Apollo_Nav_Gameplay_WaterLevel_7 loaded=false visible=false
+29728: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] nav data before count=0
+29731: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] nav data after count=0 available=true
+29733: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE][FAIL] stage=navigation_bootstrap reason=no registered Phoebe AthenaNavMesh; no evidenced 13.40 initialization; stop before spawn; no spawn, no fallback, no automatic retry
+29734: [HOST] [MESSAGE] [10/08/26-10:46:38] LogBots: [PHOEBE] result=PHOEBE-V1 NAV-BLOCKED spawned=0 Brain/BT/AI-0..7=NOT_TESTED

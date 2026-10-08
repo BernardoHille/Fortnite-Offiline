@@ -1,0 +1,281 @@
+diff --git a/Project Reboot 3.0/Bot0.cpp b/Project Reboot 3.0/Bot0.cpp
+index a7f9db5..15663cb 100644
+--- a/Project Reboot 3.0/Bot0.cpp	
++++ b/Project Reboot 3.0/Bot0.cpp	
+@@ -22,8 +22,9 @@ namespace Bot0
+ {
+     namespace
+     {
+-        enum class State { Idle, Queued, Running, Complete, Partial };
++        enum class State { Idle, Queued, QueuedNative, Running, Complete, Partial, NativeBlocked };
+         std::atomic<State> CurrentState{State::Idle};
++        std::atomic<bool> NativePhoebeFlag{false}; // UI only selects the mode of the next explicit request.
+         bool SpawnAttempted = false; // Only accessed in the existing server TickFlush context.
+         const char* Stage = "idle";
+         UObject* ContextWorld = nullptr;
+@@ -471,6 +472,7 @@ namespace Bot0
+         }
+ 
+ #include "Bot2Nav.inl"
++#include "NativePhoebe.inl"
+ 
+         void SampleMove(UObject* Pawn, UObject* Controller, ULONGLONG Elapsed)
+         {
+@@ -643,6 +645,10 @@ namespace Bot0
+             {
+                 LOG_INFO(LogBots, "[NAV][FAIL] diagnostic exception=0x{:x} stage={}; normal crash handler continues", Exception->ExceptionRecord->ExceptionCode, Stage);
+             }
++            if (std::strncmp(Stage, "PHOEBE", 6) == 0)
++            {
++                LOG_INFO(LogBots, "[PHOEBE][FAIL] stage={} exception=0x{:x}; normal crash handler continues", Stage, Exception->ExceptionRecord->ExceptionCode);
++            }
+             LogAddress("fault", Exception->ExceptionRecord->ExceptionAddress);
+             LOG_INFO(LogBots, "[BOT][FAIL] fault_context RIP=0x{:x} RSP=0x{:x}", Exception->ContextRecord->Rip, Exception->ContextRecord->Rsp);
+             void* Frames[16]{};
+@@ -658,9 +664,17 @@ namespace Bot0
+     void RequestSpawn()
+     {
+         State Expected = State::Idle;
+-        if (CurrentState.compare_exchange_strong(Expected, State::Queued))
++        const bool Native = NativePhoebeFlag.load();
++        if (CurrentState.compare_exchange_strong(Expected, Native ? State::QueuedNative : State::Queued))
+         {
+-            LOG_INFO(LogBots, "[BOT] Spawn 1 Bot requested ui_thread={}", GetCurrentThreadId());
++            if (Native)
++            {
++                LOG_INFO(LogBots, "[PHOEBE] Spawn 1 Bot requested ui_thread={} mode=native-preflight; contract remains PARTIAL", GetCurrentThreadId());
++            }
++            else
++            {
++                LOG_INFO(LogBots, "[BOT] Spawn 1 Bot requested ui_thread={}", GetCurrentThreadId());
++            }
+         }
+         else
+         {
+@@ -668,6 +682,9 @@ namespace Bot0
+         }
+     }
+ 
++    bool NativePhoebeEnabled() { return NativePhoebeFlag.load(); }
++    void SetNativePhoebeEnabled(bool Enabled) { NativePhoebeFlag.store(Enabled); }
++
+     void QueueDebug(DebugAction Action, const char* Label)
+     {
+         auto Expected = DebugAction::None;
+@@ -706,6 +723,8 @@ namespace Bot0
+         switch (CurrentState.load())
+         {
+         case State::Queued: return "Queued for server TickFlush";
++        case State::QueuedNative: return "Native Phoebe preflight queued for server TickFlush";
++        case State::NativeBlocked: return "Native Phoebe PARTIAL: preflight only; no bot spawned. Inspect [PHOEBE] logs; restart host for A/B.";
+         case State::Running: return "Native spawn attempt running";
+         case State::Complete: return "Native return complete; verify in client. Restart host for another test.";
+         case State::Partial: return "Partial/failure; inspect [BOT] logs. Restart host for another test.";
+@@ -715,11 +734,13 @@ namespace Bot0
+ 
+     void ProcessPending(UNetDriver* NetDriver)
+     {
+-        if (CurrentState.load() != State::Queued && PendingDebug.load() == DebugAction::None && !Observation.Active) return;
++        if (CurrentState.load() != State::Queued && CurrentState.load() != State::QueuedNative
++            && PendingDebug.load() == DebugAction::None && !Observation.Active) return;
+         // Kept separate from functions with C++ locals for MSVC SEH compatibility.
+         __try
+         {
+             if (CurrentState.load() == State::Queued) ProcessBody(NetDriver);
++            if (CurrentState.load() == State::QueuedNative) ProcessNativePhoebe(NetDriver);
+             ProcessDebugBody(NetDriver);
+         }
+         __except (RecordException(GetExceptionInformation())) {}
+diff --git a/Project Reboot 3.0/Bot0.h b/Project Reboot 3.0/Bot0.h
+index a8d8d13..da1ebad 100644
+--- a/Project Reboot 3.0/Bot0.h	
++++ b/Project Reboot 3.0/Bot0.h	
+@@ -5,6 +5,8 @@ class UNetDriver;
+ namespace Bot0
+ {
+     void RequestSpawn();
++    bool NativePhoebeEnabled();
++    void SetNativePhoebeEnabled(bool Enabled);
+     void RequestDump();
+     void RequestMove();
+     void RequestNavDump();
+diff --git a/Project Reboot 3.0/NativePhoebe.inl b/Project Reboot 3.0/NativePhoebe.inl
+new file mode 100644
+index 0000000..38c317b
+--- /dev/null
++++ b/Project Reboot 3.0/NativePhoebe.inl	
+@@ -0,0 +1,146 @@
++// Native Phoebe audit gate, inside Bot0's existing server-context namespace.
++// This revision deliberately has no native spawn call: its contract is unvalidated.
++// No object creation, object/property writes, native address calls, AI loops or retries.
++
++void PhoebeObject(const char* Label, UObject* Object)
++{
++    LOG_INFO(LogBots, "[PHOEBE] {} valid={} path={} class={}", Label, Valid(Object),
++        Valid(Object) ? Object->GetPathName() : "null/unavailable",
++        Valid(Object) && Valid(Object->ClassPrivate) ? Object->ClassPrivate->GetFullName() : "unavailable");
++}
++
++void PhoebeSchema(const char* Label, UStruct* Type)
++{
++    if (!Valid(Type))
++    {
++        LOG_INFO(LogBots, "[PHOEBE] {} metadata_available=false", Label);
++        return;
++    }
++    LOG_INFO(LogBots, "[PHOEBE] {} metadata_available=true properties_size={} signature/storage/ownership=unvalidated; not invoked", Label, Type->GetPropertiesSize());
++    if (Offsets::Children > 0x7fffffffULL)
++    {
++        LOG_INFO(LogBots, "[PHOEBE] {} field_list_offset=unavailable", Label);
++        return;
++    }
++    auto Field = Type->Get<void*>(static_cast<int>(Offsets::Children));
++    unsigned Count = 0;
++    while (Field && Count < 32)
++    {
++        if (IsBadReadPtr(Field, static_cast<int>(Offsets::Offset_Internal + sizeof(int)))) break;
++        auto Name = GetFNameOfProp(Field);
++        if (IsBadReadPtr(Name, sizeof(FName))) break;
++        const int Offset = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(Field) + Offsets::Offset_Internal);
++        LOG_INFO(LogBots, "[PHOEBE] {} field={} offset={} type/defaults/ownership=UNKNOWN", Label, Name->ToString(), Offset);
++        ++Count;
++        Field = GetNext(Field);
++    }
++    LOG_INFO(LogBots, "[PHOEBE] {} fields_logged={} incomplete={}", Label, Count, Field != nullptr);
++}
++
++void PhoebePresence(UObject* Object, const char* Member)
++{
++    LOG_INFO(LogBots, "[PHOEBE] property={} present={} content/storage=UNKNOWN; not interpreted or written",
++        Member, Valid(Object) && Object->GetOffset(Member, false) >= 0);
++}
++
++void PhoebeBlocked(const char* Reason)
++{
++    LOG_INFO(LogBots, "[PHOEBE][FAIL] stage={} reason={}; no spawn, no fallback, no automatic retry", Stage, Reason);
++    CurrentState.store(State::NativeBlocked);
++}
++
++void ProcessNativePhoebe(UNetDriver* Driver)
++{
++    Stage = "PHOEBE validate driver";
++    if (!StaticFindObjectOriginal || !Valid(Driver)) { PhoebeBlocked("reflection/driver unavailable"); return; }
++    auto World = Reference(Driver, "World");
++    if (!Valid(World)) { PhoebeBlocked("World invalid"); return; }
++    if (Reference(World, "NetDriver") != Driver) return; // Secondary drivers cannot consume the request.
++    auto Expected = State::QueuedNative;
++    if (!CurrentState.compare_exchange_strong(Expected, State::Running)) return;
++    ContextWorld = World;
++    ContextMode = ContextState = ContextManager = nullptr;
++    LOG_INFO(LogBots, "[PHOEBE] bootstrap begin mode=preflight-only tick_thread={}; no authority mutation", GetCurrentThreadId());
++    if (Engine_Version != 426 || std::abs(Fortnite_Version - 13.40) > 0.001
++        || !Globals::bStartedListening || World->GetName() != "Apollo_Terrain")
++    { PhoebeBlocked("requires listening Apollo 13.40 / engine 426"); return; }
++    Stage = "PHOEBE validate Athena context";
++    ContextMode = Reference(World, "AuthorityGameMode");
++    ContextState = Reference(World, "GameState");
++    EAthenaGamePhase Phase = EAthenaGamePhase::None;
++    if (!IsOf(ContextMode, L"/Script/FortniteGame.FortGameModeAthena")
++        || !IsOf(ContextState, L"/Script/FortniteGame.FortGameStateAthena")
++        || !Read(ContextState, "GamePhase", Phase) || Phase != EAthenaGamePhase::SafeZones)
++    { PhoebeBlocked("requires Athena SafeZones after landing"); return; }
++    if (SpawnAttempted || Resolve(LastBot.Pawn)) { PhoebeBlocked("host already attempted or owns a debug bot; restart for native A/B"); return; }
++    ContextManager = Reference(ContextMode, "ServerBotManager");
++    auto Mutator = Reference(ContextManager, "CachedBotMutator");
++    PhoebeObject("BotManager", ContextManager);
++    PhoebeObject("BotMutator", Mutator);
++    PhoebeObject("AIGoalManager (existing only)", Reference(ContextMode, "AIGoalManager"));
++    PhoebeObject("AIDirector (existing only)", Reference(ContextMode, "AIDirector"));
++    if (!IsOf(ContextManager, L"/Script/FortniteGame.FortServerBotManagerAthena") || !CachedContextMatches(ContextManager)
++        || !IsOf(Mutator, L"/Script/FortniteGame.FortAthenaMutator_Bots") || !CachedContextMatches(Mutator))
++    { PhoebeBlocked("existing manager/mutator or cached context invalid"); return; }
++    auto Human = HumanPawn(Driver);
++    if (!Valid(Human)) { PhoebeBlocked("connected human Pawn missing"); return; }
++
++    Stage = "PHOEBE inspect playlist and existing assets";
++    UObject* Playlist = nullptr;
++    const auto PlaylistInfo = NavStruct(ContextState, "CurrentPlaylistInfo", L"/Script/FortniteGame.PlaylistPropertyArray");
++    if (!NavRead(PlaylistInfo, "BasePlaylist", Playlist)) Playlist = Reference(ContextState, "CurrentPlaylistData");
++    if (!IsOf(Playlist, L"/Script/FortniteGame.FortPlaylistAthena")) Playlist = nullptr;
++    PhoebeObject("Playlist (effective, not source default)", Playlist);
++    auto AISettings = Reference(Playlist, "AISettings");
++    if (!IsOf(AISettings, L"/Script/FortniteGame.AthenaAISettings")) AISettings = nullptr;
++    PhoebeObject("Playlist.AISettings (existing only)", AISettings);
++    for (const char* Member : {"bAllowAIGoalManager", "bAllowAIDirector", "BotSettings", "BotPopulation", "BotSpawnerData"})
++        PhoebePresence(AISettings, Member);
++    auto ControllerCDO = FindObject(L"/Game/Athena/AI/Phoebe/BP_PhoebePlayerController.Default__BP_PhoebePlayerController_C");
++    PhoebeObject("Controller CDO (not spawned Controller)", ControllerCDO);
++    PhoebeObject("BrainComponent on CDO (not instance)", Reference(ControllerCDO, "BrainComponent"));
++    for (const char* Member : {"BotData", "BehaviorTree", "Blackboard", "PerceptionComponent", "SkillSet"})
++        PhoebePresence(ControllerCDO, Member);
++    PhoebeObject("BT_Phoebe (existing asset only)", FindObject(L"/Game/Athena/AI/Phoebe/BehaviorTrees/BT_Phoebe.BT_Phoebe"));
++    PhoebeObject("BB_Phoebe (existing asset only)", FindObject(L"/Game/Athena/AI/Phoebe/BehaviorTrees/BB_Phoebe.BB_Phoebe"));
++    PhoebeObject("Phoebe_ControllerData (CurveTable)", FindObject(L"/Game/Athena/AI/Phoebe/ControllerData/Phoebe_ControllerData.Phoebe_ControllerData"));
++    PhoebeObject("Phoebe_ManagerData (CurveTable)", FindObject(L"/Game/Athena/AI/Phoebe/ManagerData/Phoebe_ManagerData.Phoebe_ManagerData"));
++    LOG_INFO(LogBots, "[PHOEBE] BotData profile=UNKNOWN; CurveTables/CDO are not a validated generic CustomizationData; no boss asset selected");
++
++    Stage = "PHOEBE inspect native spawn metadata";
++    PhoebeSchema("Manager.SpawnAI", FindObject<UFunction>(L"/Script/FortniteGame.FortServerBotManagerAthena.SpawnAI"));
++    PhoebeSchema("Manager.SpawnBot", FindObject<UFunction>(L"/Script/FortniteGame.FortServerBotManagerAthena.SpawnBot"));
++    PhoebeSchema("RuntimeCustomizationData", FindObject<UStruct>(L"/Script/FortniteGame.FortAthenaAIBotRunTimeCustomizationData"));
++    PhoebeSchema("AIController.RunBehaviorTree", FindObject<UFunction>(L"/Script/AIModule.AIController.RunBehaviorTree"));
++    LOG_INFO(LogBots, "[PHOEBE] native_spawn_contract_ready=false; local RuntimeCustomizationData wrapper empty, native original intercepted; fixed-address helper not called");
++
++    Stage = "PHOEBE inspect registered nav";
++    auto Navigation = Reference(World, "NavigationSystem");
++    PhoebeObject("NavSystem", Navigation);
++    TArray<UObject*> Data{};
++    const bool Available = IsOf(Navigation, L"/Script/NavigationSystem.NavigationSystemV1")
++        && NavArray(Navigation, "NavDataSet", Data, 1000);
++    bool HasAthenaData = false;
++    LOG_INFO(LogBots, "[PHOEBE] NavDataSet available={} count={}", Available, Available ? Data.ArrayNum : -1);
++    if (Available)
++        for (int i = 0; i < Data.ArrayNum; ++i)
++        {
++            auto Item = Data.Data[i];
++            if (IsOf(Item, L"/Script/FortniteGame.AthenaNavMesh")) HasAthenaData = true;
++            if (i < 10) PhoebeObject("RegisteredNavData", Item);
++        }
++    FName Agent;
++    const bool HasAgent = Read(Navigation, "DefaultAgentName", Agent);
++    LOG_INFO(LogBots, "[PHOEBE] DefaultAgentName available={} name={} registered_AthenaNavMesh={} tiles/agent_match=not validated", HasAgent, HasAgent ? Agent.ToString() : "UNKNOWN", HasAthenaData);
++    bool Building = false, BuildingOrLocked = false;
++    const bool HasBuilding = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuilt", Building);
++    const bool HasLocked = NavWorldBool(World, L"/Script/NavigationSystem.NavigationSystemV1.IsNavigationBeingBuiltOrLocked", BuildingOrLocked);
++    LOG_INFO(LogBots, "[PHOEBE] building_available={} building={} building_or_locked_available={} building_or_locked={}; no unlock/rebuild", HasBuilding, Building, HasLocked, BuildingOrLocked);
++    if (!Available || !HasAthenaData)
++    {
++        LOG_INFO(LogBots, "[PHOEBE][FAIL] stage=registered_nav reason=no validated registered AthenaNavMesh; no creation/replacement/unlock");
++    }
++    Stage = "PHOEBE native_spawn_contract";
++    PhoebeBlocked("native SpawnAI/SpawnBot argument types/defaults/ownership and original path not yet validated; bootstrap NOT activated");
++    LOG_INFO(LogBots, "[PHOEBE] preflight complete status=PARTIAL spawned=0 Brain/behavior=NOT_TESTED; restart host for OFF baseline");
++}
+diff --git a/Project Reboot 3.0/Project Reboot 3.0.vcxproj b/Project Reboot 3.0/Project Reboot 3.0.vcxproj
+index fa778a3..90fcaf9 100644
+--- a/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
++++ b/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
+@@ -306,6 +306,7 @@
+     <ClInclude Include="botnames.h" />
+     <ClInclude Include="Bot0.h" />
+     <ClInclude Include="Bot2Nav.inl" />
++    <ClInclude Include="NativePhoebe.inl" />
+     <ClInclude Include="bots.h" />
+     <ClInclude Include="BP_IslandScripting.h" />
+     <ClInclude Include="BuildingActor.h" />
+diff --git a/Project Reboot 3.0/gui.h b/Project Reboot 3.0/gui.h
+index ac1a648..311396d 100644
+--- a/Project Reboot 3.0/gui.h	
++++ b/Project Reboot 3.0/gui.h	
+@@ -725,6 +725,11 @@ static inline void MainUI()
+ 
+ 				ImGui::Separator();
+ 				ImGui::TextUnformatted("Bots");
++				bool NativePhoebe = Bot0::NativePhoebeEnabled();
++				if (ImGui::Checkbox("Native Phoebe AI", &NativePhoebe))
++					Bot0::SetNativePhoebeEnabled(NativePhoebe);
++				if (NativePhoebe)
++					ImGui::TextWrapped("PARTIAL: native pipeline preflight only. Missing nav/spawn contract prevents AI spawn; inspect [PHOEBE] logs.");
+ 				if (ImGui::Button("Spawn 1 Bot"))
+ 					Bot0::RequestSpawn();
+ 				if (ImGui::Button("Dump Bot State"))
