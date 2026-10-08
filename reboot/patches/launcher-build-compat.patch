@@ -1,0 +1,35 @@
+diff --git a/common/lib/src/game/game_downloader.dart b/common/lib/src/game/game_downloader.dart
+index cbf8ebb..6634580 100644
+--- a/common/lib/src/game/game_downloader.dart
++++ b/common/lib/src/game/game_downloader.dart
+@@ -19,6 +19,12 @@ const String kRebootBelowS20DownloadUrl =
+ const String kRebootAboveS20DownloadUrl =
+     "https://nightly.link/Milxnor/Project-Reboot-3.0/workflows/msbuild/master/RebootS20.zip";
+ 
++// Restore declarations from the official parent of d53a577; callers remained in this commit.
++const String _kRebootBelowS20FallbackDownloadUrl =
++    "https://github.com/Auties00/reboot_launcher/raw/master/gui/dependencies/dlls/RebootFallback.zip";
++const String _kRebootAboveS20FallbackDownloadUrl =
++    "https://github.com/Auties00/reboot_launcher/raw/master/gui/dependencies/dlls/RebootS20Fallback.zip";
++
+ const String kStopBuildDownloadSignal = "kill";
+ 
+ final int _ariaPort = 6800;
+@@ -551,4 +557,4 @@ Future<DateTime?> _getLastUpdate(int? lastUpdateMs) async {
+   return lastUpdateMs != null
+       ? DateTime.fromMillisecondsSinceEpoch(lastUpdateMs)
+       : null;
+-}
+\ No newline at end of file
++}
+diff --git a/gui/l10n.yaml b/gui/l10n.yaml
+index 84b5ef2..954ec3e 100644
+--- a/gui/l10n.yaml
++++ b/gui/l10n.yaml
+@@ -1,3 +1,4 @@
+ arb-dir: lib/l10n
+ template-arb-file: reboot_en.arb
+-output-localization-file: reboot_localizations.dart
+\ No newline at end of file
++output-localization-file: reboot_localizations.dart
++synthetic-package: false

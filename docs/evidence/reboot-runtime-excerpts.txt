@@ -1,0 +1,41 @@
+Selected evidence from the user-provided launcher.log; not the full log.
+Source SHA-256: f02d5c092ef125c6619e8ab6413100ec273316d94ab0dfe64cd7585a51d43311
+Project-specific root normalized to <PROJECT>. Account/argument lines are not included.
+
+5: [DLL] Downloading GameDll.console...
+7: [DLL] Downloaded GameDll.console
+10: [DLL] Downloading GameDll.auth...
+12: [DLL] Downloaded GameDll.auth
+15: [DLL] Downloading GameDll.memoryLeak...
+17: [DLL] Downloaded GameDll.memoryLeak
+49: [BACKEND] Message: LawinServer started listening on port 3551
+51: [BACKEND] Message: XMPP and Matchmaker started listening on port 80
+55: [HOST] Implicit game server metadata: headless(false)
+92: [HOST] File to inject for auth at path File: '<PROJECT>\reboot\artifacts\launcher\Release\dlls\sinum.dll'
+94: [HOST] Injected auth
+2625: [HOST] File to inject for gameServer at path File: '<PROJECT>\reboot\artifacts\reboot3\Release\Project Reboot 3.0.dll'
+2629: [HOST] Injected gameServer
+3568: [HOST] [MESSAGE] [10/07/26-21:00:20] LogDev: Using "open Apollo_Terrain" as our map.
+4714: [HOST] [MESSAGE] [10/07/26-21:00:31] LogNet: Listening on port 7777!
+4718: [HOST] [MESSAGE] [10/07/26-21:00:31] LogDev: bShouldUseReplicationGraph: true
+8291: [HOST] [MESSAGE] LogWindows: Error: Fatal error!
+8386: [HOST] Implicit game server metadata: headless(true)
+8421: [HOST] File to inject for auth at path File: '<PROJECT>\reboot\artifacts\launcher\Release\dlls\sinum.dll'
+8423: [HOST] Injected auth
+10938: [HOST] File to inject for gameServer at path File: '<PROJECT>\reboot\artifacts\reboot3\Release\Project Reboot 3.0.dll'
+10948: [HOST] Injected gameServer
+11595: [HOST] [MESSAGE] [10/07/26-21:08:52] LogDev: Using "open Apollo_Terrain" as our map.
+12843: [HOST] [MESSAGE] [10/07/26-21:09:02] LogNet: Listening on port 7777!
+12847: [HOST] [MESSAGE] [10/07/26-21:09:02] LogDev: bShouldUseReplicationGraph: true
+13288: [GAME] File to inject for auth at path File: '<PROJECT>\reboot\artifacts\launcher\Release\dlls\sinum.dll'
+13290: [GAME] Injected auth
+15800: [GAME] File to inject for console at path File: '<PROJECT>\reboot\artifacts\launcher\Release\dlls\console.dll'
+15802: [GAME] Injected console
+18459: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: ServerAttemptAircraftJumpHook!
+18461: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: SpawnDefaultPawnForHook!
+18463: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: Calling SpawnDefaultPawnAtTransformFn!
+18469: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: Finished SpawnDefaultPawnAtTransformFn!
+18473: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: Giving GameplayEffect BlueprintGeneratedClass /Game/Athena/Playlists/DefaultModifiers/GE_DefaultResourceCap.GE_DefaultResourceCap_C
+18475: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: Giving GameplayEffect BlueprintGeneratedClass /Game/Athena/Playlists/DefaultModifiers/GE_DefaultTurboBuildSettings.GE_DefaultTurboBuildSettings_C
+18477: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: Finish SpawnDefaultPawnFor!
+18483: [HOST] [MESSAGE] [10/07/26-21:12:57] LogDev: ServerAcknowledgePossession!

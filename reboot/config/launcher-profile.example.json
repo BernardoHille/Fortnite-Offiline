@@ -1,0 +1,19 @@
+{
+  "profileName": "Fortnite 13.40 CL 14113327",
+  "gameVersion": "13.40",
+  "backendType": 0,
+  "gameServerAddress": "127.0.0.1",
+  "backendDetached": false,
+  "gameServerPort": "7777",
+  "headless": true,
+  "autoRestart": false,
+  "customLaunchArguments": "",
+  "serverName": "Local Season 13",
+  "serverDescription": "Local runtime test",
+  "hostPanelSettings": {
+    "playersRequiredToStart": 1,
+    "privateIpsAreOperator": true,
+    "noMcp": true
+  },
+  "notes": "Headless true matches the successful session in the provided log. No personal accounts or passwords. Host panel settings are documented, not automatically applied. This file never launches processes."
+}

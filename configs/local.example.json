@@ -1,0 +1,14 @@
+{
+  "buildPath": "",
+  "buildArchivePath": "",
+  "backendHost": "127.0.0.1",
+  "backendPort": 3551,
+  "gameServerHost": "127.0.0.1",
+  "gameServerPort": 7777,
+  "environment": "local",
+  "phase": 2,
+  "accountId": "local-player",
+  "displayName": "Bernardo",
+  "clientIsolation": "unverified",
+  "clientRouting": "unverified"
+}

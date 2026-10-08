@@ -1,0 +1,11 @@
+'use strict';
+const assert = require('node:assert/strict');
+require('../backend/offline-guard.cjs');
+const blocked = /external networking and child processes are disabled/;
+assert.throws(() => require('node:net').connect({host:'example.com', port:443}), blocked);
+assert.throws(() => require('node:http').get('http://example.com'), blocked);
+assert.throws(() => require('node:dns').lookup('example.com', () => {}), blocked);
+assert.throws(() => require('node:dgram').createSocket('udp4'), blocked);
+assert.throws(() => require('node:child_process').spawn('unused'), blocked);
+assert.throws(() => fetch('https://example.com'), blocked);
+console.log('[OK] External TCP/HTTP/DNS/UDP/fetch and child process attempts were blocked before access.');

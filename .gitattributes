@@ -1,0 +1,7 @@
+* text=auto
+*.ps1 text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.patch text eol=lf

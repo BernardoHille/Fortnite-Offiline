@@ -1,0 +1,55 @@
+diff --git a/index.js b/index.js
+index b0a0963..0bf7e90 100644
+--- a/index.js
++++ b/index.js
+@@ -4,6 +4,18 @@ const fs = require("fs");
+ const path = require("path");
+ const cookieParser = require("cookie-parser");
+ 
++if (process.env.FORTNITE_LOCAL_PHASE !== "1" || process.env.HOST !== "127.0.0.1") {
++    throw new Error("This audited checkout only supports local Phase 1 infrastructure checks.");
++}
++let server;
++express.set("query parser", false);
++express.get("/health", (req, res) => res.json({ status: "ok", backend: "LawinServer", phase: 1, environment: "local" }));
++express.post("/__phase1/shutdown", (req, res) => {
++    res.json({ status: "stopping" });
++    server.close(() => process.exit(0));
++});
++express.use((req, res) => res.status(503).json({ error: "Phase 1: game integration routes are disabled" }));
++
+ express.use(Express.json());
+ express.use(Express.urlencoded({ extended: true }));
+ express.use(Express.static('public'));
+@@ -26,17 +38,21 @@ express.use(require("./structure/cloudstorage.js"));
+ express.use(require("./structure/mcp.js"));
+ 
+ const port = process.env.PORT || 3551;
+-express.listen(port, () => {
++server = express.listen(port, "127.0.0.1", () => {
+     console.log("LawinServer started listening on port", port);
+ 
+-    require("./structure/xmpp.js");
++    // XMPP and matchmaking are not started during Phase 1.
+ }).on("error", (err) => {
+     if (err.code == "EADDRINUSE") console.log(`\x1b[31mERROR\x1b[0m: Port ${port} is already in use!`);
+     else throw err;
+ 
+-    process.exit(0);
++    process.exit(1);
+ });
+ 
++for (const signal of ["SIGINT", "SIGTERM"]) {
++    process.on(signal, () => server.close(() => process.exit(0)));
++}
++
+ try {
+     if (!fs.existsSync(path.join(process.env.LOCALAPPDATA, "LawinServer"))) fs.mkdirSync(path.join(process.env.LOCALAPPDATA, "LawinServer"));
+ } catch (err) {
+@@ -62,4 +78,4 @@ express.use((req, res, next) => {
+         "originatingService": "any",
+         "intent": "prod"
+     });
+-});
+\ No newline at end of file
++});

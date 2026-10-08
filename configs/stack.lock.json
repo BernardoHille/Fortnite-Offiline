@@ -1,0 +1,20 @@
+{
+  "auditedDate": "2026-10-07",
+  "phase": 1,
+  "gameserver": {
+    "name": "FortExternalServer",
+    "url": "https://github.com/OGFN-Open-sourceing/FortExternalServer.git",
+    "branch": "season-13",
+    "commit": "e42ecddbce59163c6a60ab7506766c2a0adfe580",
+    "license": "MIT",
+    "runtimeApproved": false
+  },
+  "backend": {
+    "name": "LawinServer",
+    "url": "https://github.com/Lawin0129/LawinServer.git",
+    "branch": "main",
+    "commit": "7f0f26d7a772c6122c42b1783fd75f497e86d3a9",
+    "license": "GPL-3.0",
+    "patches": ["backend/patches/phase1-isolation.patch", "backend/patches/dependency-audit.patch"]
+  }
+}

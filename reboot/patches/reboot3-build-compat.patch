@@ -1,0 +1,28 @@
+diff --git a/Project Reboot 3.0/Project Reboot 3.0.vcxproj b/Project Reboot 3.0/Project Reboot 3.0.vcxproj
+index 6976388..fced625 100644
+--- a/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
++++ b/Project Reboot 3.0/Project Reboot 3.0.vcxproj	
+@@ -125,7 +125,7 @@
+     <ClCompile>
+       <WarningLevel>Level3</WarningLevel>
+       <SDLCheck>true</SDLCheck>
+-      <PreprocessorDefinitions>_DEBUG;PROJECTREBOOT30_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>_ITERATOR_DEBUG_LEVEL=0;PROJECTREBOOT30_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <PreprocessorDefinitions Condition="'$(AboveS20)'!=''">ABOVE_S20;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ConformanceMode>true</ConformanceMode>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+@@ -133,6 +133,7 @@
+       <LanguageStandard>stdcpplatest</LanguageStandard>
+       <AdditionalIncludeDirectories>../vendor</AdditionalIncludeDirectories>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
++      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+     </ClCompile>
+     <Link>
+@@ -519,4 +520,4 @@
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+   <ImportGroup Label="ExtensionTargets">
+   </ImportGroup>
+-</Project>
+\ No newline at end of file
++</Project>
